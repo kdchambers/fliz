@@ -14,6 +14,7 @@ const assert = std.debug.assert;
 const print = std.debug.print;
 
 const geometry = @import("geometry.zig");
+const graphics = @import("graphics.zig");
 const Scale2D = geometry.Scale2D;
 const Shift2D = geometry.Shift2D;
 
@@ -155,7 +156,7 @@ const BoundingBox = packed struct {
 const Bitmap = struct {
     width: u32,
     height: u32,
-    pixels: []u8,
+    pixels: []graphics.RGBA(f32),
 };
 
 const coordinate_types: []u8 = undefined;
@@ -386,13 +387,6 @@ fn getGlyphShape(allocator: Allocator, info: FontInfo, glyph_index: i32) ![]Vert
 
         var glyph_flags: [*]u8 = @intToPtr([*]u8, glyph_offset_index + @sizeOf(GlyhHeader) + (@intCast(usize, contour_count) * 2) + 2 + @intCast(usize, instructions_size_bytes));
 
-        // {
-        //     var r: u32 = 0;
-        //     while (r < contour_count) : (r += 1) {
-        //         print("END PT: {d}\n", .{bigToNative(u16, end_points_of_contours[r])});
-        //     }
-        // }
-
         // NOTE: The number of flags is determined by the last entry in the endPtsOfContours array
         n = 1 + readBigEndian(u16, @ptrToInt(end_points_of_contours) + (@intCast(usize, contour_count - 1) * 2));
 
@@ -428,14 +422,6 @@ fn getGlyphShape(allocator: Allocator, info: FontInfo, glyph_index: i32) ![]Vert
                 flags_len += 1;
             }
         }
-
-        // {
-        //     const start = @intCast(usize, off);
-        //     for(vertices[start..start + flags_len]) |vertex| {
-        //         const printf = std.debug.print;
-        //         printf("on_curve: {d}\n", .{vertex.kind & GlyphFlags.on_curve_point});
-        //     }
-        // }
 
         {
             var x: i16 = 0;
@@ -738,10 +724,6 @@ fn Point(comptime T: type) type {
     return packed struct {
         x: T,
         y: T,
-
-        // pub fn print(self: @This()) void {
-        //     std.debug.print("{d}, {d}\n", .{self.x, self.y});
-        // }
     };
 }
 
@@ -850,38 +832,6 @@ fn quadraticBezierPlaneIntersection2(horizontal_axis: f64, bezier: BezierQuadrat
     return ab_lerp_x + ((bc_lerp_x - ab_lerp_x) * t);
 }
 
-// t = -(sqrt(-2 b y_1 + y_0 (b - y_2) + b y_2 + y_1^2) - y_0 + y_1) / (y_0 - 2 y_1 + y_2) and y_0 + y_2!=2 y_1
-// fn quadraticBezierPlaneIntersection(vertical_axis: f64, bezier: BezierQuadratic) f64 {
-
-//     // ISSUE: This apparently works.. but, this equation needs to return up to two points of intersection
-
-//     const y0 = bezier.a.y;
-//     const y1 = bezier.control.y;
-//     const y2 = bezier.b.y;
-//     const b = vertical_axis;
-
-//     const bottom = y0 - (2 * y1) + y2;
-//     const top = -(std.math.sqrt((-2.0 * b * y1) + y0 * (b - y2) + (b * y2) + (y1 * y1)) - y0 + y1);
-//     const t = top / bottom;
-
-//     // const control_squared = bezier.control.y * bezier.control.y;
-//     // const a = bezier.a.y - (2.0 * bezier.control.y) + bezier.b.y;
-//     // const top = (bezier.a.y - bezier.control.y) - std.math.sqrt((vertical_axis * a) + control_squared - (bezier.a.y * bezier.b.y));
-//     // const t = top / a;
-
-//     std.log.info("T({d})", .{t});
-
-//     // std.log.info("T({d}) - {d}", .{t, quadraticBezierPoint(t, bezier).x});
-
-//     std.debug.assert(t <= 1.0);
-//     std.debug.assert(t >= 0.0);
-//     // std.debug.assert(quadraticBezierPoint(t, bezier).y == vertical_axis);
-
-//     return quadraticBezierPoint(t, bezier).x;
-// }
-
-// C(t) = (1 - t)^2 * p_0 + 2t(1 - t) * p_1 + t ^ 2 * p_2
-
 fn quadraticBezierPoint2(bezier: BezierQuadratic, t: f64) Point(f64) {
     const ab_lerp_x = bezier.a.x + ((bezier.control.x - bezier.a.x) * t);
     const ab_lerp_y = bezier.a.y + ((bezier.control.y - bezier.a.y) * t);
@@ -956,12 +906,12 @@ const IntersectionList = struct {
         self.buffer[self.count].outline_index = intersection.outline_index;
         self.buffer[self.count].t = intersection.t;
 
-        if(self.buffer[self.count].t) |t| {
+        if (self.buffer[self.count].t) |t| {
             std.debug.print("Intersection V {d} w/ t {d} ({s}) added at X {d:.4}\n", .{ self.buffer[self.count].outline_index, t, extra, self.buffer[self.count].x_position });
         } else {
             std.debug.print("Intersection V {d} ({s}) added at X {d:.4}\n", .{ self.buffer[self.count].outline_index, extra, self.buffer[self.count].x_position });
         }
-        
+
         self.count += 1;
     }
 
@@ -972,17 +922,7 @@ const IntersectionList = struct {
 
 fn triangleArea(p1: Point(f64), p2: Point(f64), p3: Point(f64)) f64 {
     // |x₁(y₂-y₃) + x₂(y₃-y₁) + x₃(y₁-y₂)|
-
     return abs((p1.x * (p2.y - p3.y)) + (p2.x * (p3.y - p1.y)) + (p3.x * (p1.y - p2.y))) / 2.0;
-
-    // ((p1.x * p2.y) + (p2.x * p3.y) + (p3.x * p1.y) - (p1.y * p2.x) - (p2.x * p3.y) - (p3.y * p1.x)) / 2.0
-    // const calc_1 = p1.x * p2.y;
-    // const calc_2 = p2.x * p3.y;
-    // const calc_3 = p3.x * p1.y;
-    // const calc_4 = p1.y * p2.x;
-    // const calc_5 = p2.x * p3.y;
-    // const calc_6 = p3.y * p1.x;
-    // return abs(calc_1 + calc_2 + calc_3 - calc_4 - calc_5 - calc_6) / 2.0;
 }
 
 const Coverage = struct {
@@ -1163,63 +1103,11 @@ fn calculateCoverage(entry: Point(f64), exit: Point(f64), is_positive: bool) f64
     return coverage;
 }
 
-// const Side = enum {
-//     left,
-//     right,
-//     top,
-//     bottom,
-// };
-
-// const CurveSegmentType = enum {
-//     convex,
-//     concave, // curves inward (x to right of both end points)
-// };
-
-// const CurveIntersectionType = enum {
-// //  type - entry - exit
-//     convex_right_top,
-//     convex_right_bottom,
-//     convex_right_left,
-//     convex_top_bottom,
-//     convex_top_left,
-//     convex_top_right,
-//     convex_left_bottom,
-//     convex_left_right,
-//     convex_left_top,
-//     convex_bottom_right,
-//     convex_bottom_top,
-//     convex_bottom_left,
-//     // Inward
-//     concave_right_top,
-//     concave_right_bottom,
-//     concave_right_left,
-//     concave_top_bottom,
-//     concave_top_left,
-//     concave_top_right,
-//     concave_left_bottom,
-//     concave_left_right,
-//     concave_left_top,
-//     concave_bottom_right,
-//     concave_bottom_top,
-//     concave_bottom_left,
-// };
-
-// fn pointSide(point: f64) Side {
-//     if(point.x == 1.0) return .right;
-//     if(point.x == 0.0) return .left;
-//     if(point.y == 1.0) return .top;
-//     if(point.y == 0.0) return .bottom;
-//     unreachable;
-// }
-
 const CurveIntersectionType = enum(u8) {
     pub const left = 0b0000_0001;
     pub const right = 0b0000_0010;
     pub const top = 0b0000_0100;
     pub const bottom = 0b0000_1000;
-    
-    // pub const concave = 0b0001_0000;
-    // pub const convex = 0b0010_0000;
 
     right_top = right | top,
     right_bottom = right | bottom,
@@ -1228,7 +1116,7 @@ const CurveIntersectionType = enum(u8) {
     top_left = top | left,
     left_bottom = left | bottom,
 
-    _
+    _,
 
     // right_top = right | top,
     // right_bottom = right | bottom,
@@ -1257,7 +1145,6 @@ fn calculateLineSegmentSlope(point_a: Point(f64), point_b: Point(f64)) f64 {
 }
 
 fn pixelCurveCoverage(points: []Point(f64)) f64 {
-
     comptime {
         const T = CurveIntersectionType;
         std.debug.assert(@intToEnum(T, T.right | T.top) == T.right_top);
@@ -1267,28 +1154,30 @@ fn pixelCurveCoverage(points: []Point(f64)) f64 {
         std.debug.assert(@intToEnum(T, T.top | T.left) == T.top_left);
         std.debug.assert(@intToEnum(T, T.left | T.bottom) == T.left_bottom);
     }
-    
+
     const first = points[0];
     const last = points[points.len - 1];
 
-    std.log.info("First {d:.4} {d:.4} Last {d:.4} {d:.4}", .{first.x, first.y, last.x, last.y});
+    std.log.info("First {d:.4} {d:.4} Last {d:.4} {d:.4}", .{ first.x, first.y, last.x, last.y });
 
     std.debug.assert(points.len > 1);
 
-    if(points.len == 2) {
-        return calculateCoverage(first, last, true);
+    if (points.len == 2) {
+        const is_to_right = if (last.x > first.x) true else false;
+        const is_positive = if ((is_to_right and last.y > first.y)) true else false;
+        return calculateCoverage(first, last, is_positive);
     }
 
-    for(points) |point, point_i| {
+    for (points) |point, point_i| {
         const printf = std.debug.print;
-        printf("P {d:.2}: {d:.4}, {d:.4}\n", .{point_i, point.x, point.y});
+        printf("P {d:.2}: {d:.4}, {d:.4}\n", .{ point_i, point.x, point.y });
         std.debug.assert(point.x >= 0.0);
         std.debug.assert(point.x <= 1.0);
         std.debug.assert(point.y >= 0.0);
         std.debug.assert(point.y <= 1.0);
     }
 
-    const averaged_point = Point(f64) {
+    const averaged_point = Point(f64){
         .x = (first.x + last.x) / 2.0,
         .y = (first.y + last.y) / 2.0,
     };
@@ -1298,22 +1187,23 @@ fn pixelCurveCoverage(points: []Point(f64)) f64 {
     const middle_point = points[@divTrunc(points.len, 2)];
 
     var intersection_type_int: u8 = 0;
-    if(first.x == 0.0 or last.x == 0.0) intersection_type_int |= CurveIntersectionType.left;
-    if(first.x == 1.0 or last.x == 1.0) intersection_type_int |= CurveIntersectionType.right;
-    if(first.y == 0.0 or last.y == 0.0) intersection_type_int |= CurveIntersectionType.bottom;
-    if(first.y == 1.0 or last.y == 1.0) intersection_type_int |= CurveIntersectionType.top;
+    if (first.x == 0.0 or last.x == 0.0) intersection_type_int |= CurveIntersectionType.left;
+    if (first.x == 1.0 or last.x == 1.0) intersection_type_int |= CurveIntersectionType.right;
+    if (first.y == 0.0 or last.y == 0.0) intersection_type_int |= CurveIntersectionType.bottom;
+    if (first.y == 1.0 or last.y == 1.0) intersection_type_int |= CurveIntersectionType.top;
 
-    switch(@intToEnum(CurveIntersectionType, intersection_type_int)) {
+    switch (@intToEnum(CurveIntersectionType, intersection_type_int)) {
         .right_top => {
             // Averaged point -> Middle point forms a positive line
             const is_concave = calculateLineSegmentSlope(averaged_point, middle_point) > 0;
-            if(is_concave) {
+            std.log.info("Is concave: {}", .{is_concave});
+            if (is_concave) {
                 // 2 squares + calc triangle fan
                 std.debug.assert(first.x == 1.0 or last.x == 1.0);
                 std.debug.assert(first.y == 1.0 or last.y == 1.0);
-                const fixed_point = Point(f64) {
-                    .x = if(first.x == 1.0) last.x else first.x,
-                    .y = if(first.y == 1.0) last.y else first.y,
+                const fixed_point = Point(f64){
+                    .x = if (first.x == 1.0) last.x else first.x,
+                    .y = if (first.y == 1.0) last.y else first.y,
                 };
                 const bottom = fixed_point.y;
                 const left = fixed_point.x;
@@ -1322,15 +1212,15 @@ fn pixelCurveCoverage(points: []Point(f64)) f64 {
                 std.debug.assert(coverage >= 0.0);
                 std.debug.assert(coverage <= 1.0);
                 var i: usize = 0;
-                while(i < (points.len - 1)) : (i += 1) {
+                while (i < (points.len - 1)) : (i += 1) {
                     coverage += triangleArea(points[i], points[i + 1], fixed_point);
                 }
-                return coverage;
+                return 1.0 - coverage;
             }
             // Triangle fan from Top Right
             var coverage: f64 = 0;
             var i: usize = 0;
-            while(i < (points.len - 1)) : (i += 1) {
+            while (i < (points.len - 1)) : (i += 1) {
                 coverage += triangleArea(points[i], points[i + 1], .{ .x = 1.0, .y = 1.0 });
             }
             return coverage;
@@ -1338,27 +1228,31 @@ fn pixelCurveCoverage(points: []Point(f64)) f64 {
         .right_bottom => {
             // Averaged point -> Middle point forms a negative line
             const is_concave = calculateLineSegmentSlope(averaged_point, middle_point) < 0;
-            if(is_concave) {
+            std.log.info("Is concave: {}", .{is_concave});
+            if (is_concave) {
                 // 2 squares + calc triangle fan
                 std.debug.assert(first.x == 1.0 or last.x == 1.0);
                 std.debug.assert(first.y == 0.0 or last.y == 0.0);
-                const fixed_point = Point(f64) {
-                    .x = if(first.x == 1.0) last.x else first.x,
-                    .y = if(first.y == 0.0) last.y else first.y,
+                const fixed_point = Point(f64){
+                    .x = if (first.x == 1.0) last.x else first.x,
+                    .y = if (first.y == 0.0) last.y else first.y,
                 };
-                var coverage = 1.0 - (fixed_point.x + fixed_point.y);
+                const left = fixed_point.x;
+                const top = (1.0 - fixed_point.y);
+                const intersection = left * top;
+                var coverage = left + top - intersection;
                 std.debug.assert(coverage >= 0.0);
                 std.debug.assert(coverage <= 1.0);
                 var i: usize = 0;
-                while(i < (points.len - 1)) : (i += 1) {
+                while (i < (points.len - 1)) : (i += 1) {
                     coverage += triangleArea(points[i], points[i + 1], fixed_point);
                 }
-                return coverage;
+                return 1.0 - coverage;
             }
             // Triangle fan from Bottom Right
             var coverage: f64 = 0;
             var i: usize = 0;
-            while(i < (points.len - 1)) : (i += 1) {
+            while (i < (points.len - 1)) : (i += 1) {
                 coverage += triangleArea(points[i], points[i + 1], .{ .x = 1.0, .y = 0.0 });
             }
             return coverage;
@@ -1367,16 +1261,16 @@ fn pixelCurveCoverage(points: []Point(f64)) f64 {
             // Regardless of whether convex or concave,
             // we're averaging the y values and returning the bottom half
             var total_y: f64 = 0;
-            for(points) |point| {
+            for (points) |point| {
                 total_y += point.y;
             }
-            return (total_y / @intToFloat(f64, points.len));
+            return 1.0 - (total_y / @intToFloat(f64, points.len));
         },
         .top_bottom => {
             // Regardless of whether convex or concave,
             // we're averaging the x values and returning the right half
             var total_x: f64 = 0;
-            for(points) |point| {
+            for (points) |point| {
                 total_x += point.x;
             }
             return 1.0 - (total_x / @intToFloat(f64, points.len));
@@ -1384,22 +1278,22 @@ fn pixelCurveCoverage(points: []Point(f64)) f64 {
         .top_left => {
             // Averaged point -> Middle point forms a negative line
             const is_concave = calculateLineSegmentSlope(averaged_point, middle_point) < 0;
-            if(is_concave) {
-                std.log.info("Concave", .{});
+            std.log.info("Is concave: {}", .{is_concave});
+            if (is_concave) {
                 // Triangle fan from Top Left
                 var coverage: f64 = 0;
                 var i: usize = 0;
-                while(i < (points.len - 1)) : (i += 1) {
+                while (i < (points.len - 1)) : (i += 1) {
                     coverage += triangleArea(points[i], points[i + 1], .{ .x = 0.0, .y = 1.0 });
                 }
-                return coverage;
+                return 1.0 - coverage;
             }
             // 2 squares + calc triangle fan
             std.debug.assert(first.x == 0.0 or last.x == 0.0);
             std.debug.assert(first.y == 1.0 or last.y == 1.0);
-            const fixed_point = Point(f64) {
-                .x = if(first.x == 0.0) last.x else first.x,
-                .y = if(first.y == 1.0) last.y else first.y,
+            const fixed_point = Point(f64){
+                .x = if (first.x == 0.0) last.x else first.x,
+                .y = if (first.y == 1.0) last.y else first.y,
             };
             const bottom = fixed_point.y;
             const right = 1.0 - (fixed_point.x);
@@ -1409,34 +1303,32 @@ fn pixelCurveCoverage(points: []Point(f64)) f64 {
             std.debug.assert(coverage >= 0.0);
             std.debug.assert(coverage <= 1.0);
             var i: usize = 0;
-            while(i < (points.len - 1)) : (i += 1) {
-                std.log.info("Area coverage: ({d:.4}, {d:.4}) ({d:.4}, {d:.4}) ({d:.4}, {d:.4}): {d:.6}", .{
-                        points[i].x, points[i].y, points[i + 1].x, points[i + 1].y, 
-                    fixed_point.x, fixed_point.y, triangleArea(points[i], points[i + 1], fixed_point)
-                });
+            while (i < (points.len - 1)) : (i += 1) {
+                // std.log.info("Area coverage: ({d:.4}, {d:.4}) ({d:.4}, {d:.4}) ({d:.4}, {d:.4}): {d:.6}", .{ points[i].x, points[i].y, points[i + 1].x, points[i + 1].y, fixed_point.x, fixed_point.y, triangleArea(points[i], points[i + 1], fixed_point) });
                 coverage += triangleArea(points[i], points[i + 1], fixed_point);
             }
             std.log.info("Full coverage: {d}", .{coverage});
-            return coverage;
+            return 1.0 - coverage;
         },
         .left_bottom => {
             // Averaged point -> Middle point forms a positive line
             const is_concave = calculateLineSegmentSlope(averaged_point, middle_point) > 0;
-            if(is_concave) {
+            std.log.info("Is concave: {}", .{is_concave});
+            if (is_concave) {
                 // Triangle fan from Bottom Left
                 var coverage: f64 = 0;
                 var i: usize = 0;
-                while(i < (points.len - 1)) : (i += 1) {
+                while (i < (points.len - 1)) : (i += 1) {
                     coverage += triangleArea(points[i], points[i + 1], .{ .x = 0.0, .y = 0.0 });
                 }
-                return coverage;
+                return 1.0 - coverage;
             }
             // 2 squares + calc triangle fan
             std.debug.assert(first.x == 0.0 or last.x == 0.0);
             std.debug.assert(first.y == 0.0 or last.y == 0.0);
-            const fixed_point = Point(f64) {
-                .x = if(first.x == 0.0) last.x else first.x,
-                .y = if(first.y == 0.0) last.y else first.y,
+            const fixed_point = Point(f64){
+                .x = if (first.x == 0.0) last.x else first.x,
+                .y = if (first.y == 0.0) last.y else first.y,
             };
             const top = 1.0 - fixed_point.y;
             const right = 1.0 - fixed_point.x;
@@ -1445,58 +1337,26 @@ fn pixelCurveCoverage(points: []Point(f64)) f64 {
             std.debug.assert(coverage >= 0.0);
             std.debug.assert(coverage <= 1.0);
             var i: usize = 0;
-            while(i < (points.len - 1)) : (i += 1) {
+            while (i < (points.len - 1)) : (i += 1) {
                 coverage += triangleArea(points[i], points[i + 1], fixed_point);
             }
             return coverage;
         },
         else => {
             // TODO:
+            std.debug.assert(false);
             return 0.5;
-        }
-        // convex_right_bottom, convex_bottom_right => {
-        //     // Triangle fan from Bottom Right
-        // },
-        // convex_right_left, convex_left_right, concave_right_left, concave_left_right => {
-        //     // Average all Y values and take lower half
-        // },
-        // convex_top_bottom, concave_top_bottom, convex_bottom_top, concave_bottom_top => {
-        //     // Average all X values and take right half
-        // },
-        // convex_top_left, convex_left_top => {
-        //     // make 2 squares + triangle fan from new point
-        // }, 
-        // convex_left_bottom, convex_bottom_left => {
-        //     // 2 squares + calc triangle fan
-        // },
-        // concave_right_top => {
-        //     // 2 squares + calc triangle fan
-        // },
-        // concave_right_bottom => {
-        //     // 2 squares + calc triangle fan
-        // },
-        // concave_top_left, concave_left_top => {
-        //     // Triangle fan from Top Left
-        // },
-        // concave_top_right => {
-        //     // 2 squares + calc triangle fan
-        // },
-        // concave_left_bottom, concave_bottom_left => {
-        //     // Triangle fan from Bottom Left
-        // },
-        // concave_bottom_right => {
-        //     // 2 squares + calc triangle fan
-        // },
+        },
     }
     return 0;
 }
 
 fn clamp(value: f64, val_min: f64, val_max: f64) f64 {
     std.debug.assert(val_min < val_max);
-    if(value > val_max) {
+    if (value > val_max) {
         return val_max;
     }
-    if(value < val_min) {
+    if (value < val_min) {
         return val_min;
     }
     return value;
@@ -1504,10 +1364,9 @@ fn clamp(value: f64, val_min: f64, val_max: f64) f64 {
 
 /// Given a point within a pixel and a slope, calculate where it leaves the pixel
 fn pixelLineIntersection(x_per_y: f64, point: Point(f64)) Point(f64) {
-
     const x_per_unit: f64 = x_per_y;
-    const y_per_unit: f64 = if(x_per_y > 0) 1 else -1;
-    
+    const y_per_unit: f64 = if (x_per_y > 0) 1 else -1;
+
     const y_per_x = 1 / x_per_y;
 
     const units_to_left = -point.x / x_per_y;
@@ -1521,31 +1380,30 @@ fn pixelLineIntersection(x_per_y: f64, point: Point(f64)) Point(f64) {
     std.debug.print("units_to_bottom: {d}\n", .{units_to_bottom});
 
     var best_scale: f64 = std.math.floatMax(f64);
-    if(units_to_left > 0 and units_to_left < best_scale)
+    if (units_to_left > 0 and units_to_left < best_scale)
         best_scale = units_to_left;
-    if(units_to_right > 0 and units_to_right < best_scale)
+    if (units_to_right > 0 and units_to_right < best_scale)
         best_scale = units_to_right;
-    if(units_to_top > 0 and units_to_top < best_scale)
+    if (units_to_top > 0 and units_to_top < best_scale)
         best_scale = units_to_top;
-    if(units_to_bottom > 0 and units_to_bottom < best_scale)
+    if (units_to_bottom > 0 and units_to_bottom < best_scale)
         best_scale = units_to_bottom;
 
     std.debug.print("Best scale: {d}\n", .{best_scale});
     std.debug.print("x_per_y: {d}\n", .{x_per_y});
     std.debug.print("y_per_x: {d}\n", .{y_per_x});
 
-    std.debug.print("Result: {d} {d}\n", .{point.x + (best_scale), point.y + (best_scale * y_per_x)});
+    std.debug.print("Result: {d} {d}\n", .{ point.x + (best_scale), point.y + (best_scale * y_per_x) });
 
-    return Point(f64) {
+    return Point(f64){
         .x = point.x + (best_scale * x_per_unit), // need a best scale of 1
         .y = point.y + (best_scale * y_per_unit),
     };
 }
 
 test "pixelLineIntersection" {
-
     {
-        const point = Point(f64) {
+        const point = Point(f64){
             .x = 0.5,
             .y = 0.5,
         };
@@ -1555,7 +1413,7 @@ test "pixelLineIntersection" {
     }
 
     {
-        const point = Point(f64) {
+        const point = Point(f64){
             .x = 0.5,
             .y = 0.5,
         };
@@ -1565,7 +1423,7 @@ test "pixelLineIntersection" {
     }
 
     {
-        const point = Point(f64) {
+        const point = Point(f64){
             .x = 0.5,
             .y = 0.5,
         };
@@ -1575,7 +1433,7 @@ test "pixelLineIntersection" {
     }
 
     {
-        const point = Point(f64) {
+        const point = Point(f64){
             .x = 0.0,
             .y = 0.0,
         };
@@ -1588,8 +1446,35 @@ test "pixelLineIntersection" {
 
 // Maybe I could calculate all of the intersections for each scanline upfront before I try and rasterize
 // I could mark all of the vertex intersections and use that as a starting point
-// That could make a lot of the code simpler as between connections wouldn't have to deal with those 
+// That could make a lot of the code simpler as between connections wouldn't have to deal with those
 // edge cases
+
+fn pixelFill(coverage: f64) graphics.RGBA(f32) {
+    return .{
+        .r = 1.0,
+        .g = 1.0,
+        .b = 1.0,
+        .a = @floatCast(f32, coverage),
+    };
+}
+
+fn pixelCurve(coverage: f64) graphics.RGBA(f32) {
+    return .{
+        .r = 1.0,
+        .g = 0.0,
+        .b = 0.0,
+        .a = @floatCast(f32, coverage),
+    };
+}
+
+fn pixelCurve2(coverage: f64) graphics.RGBA(f32) {
+    return .{
+        .r = 1.0,
+        .g = 1.0,
+        .b = 1.0,
+        .a = @floatCast(f32, coverage),
+    };
+}
 
 fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
     std.log.info("Glyph bbox {d} x {d} -- {d} x {d}", .{ min_x, min_y, max_x, max_y });
@@ -1597,9 +1482,15 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
     var bitmap = Bitmap{
         .width = @intCast(u32, dimensions.width),
         .height = @intCast(u32, dimensions.height),
-        .pixels = try allocator.alloc(u8, bitmap_pixel_count),
+        .pixels = try allocator.alloc(graphics.RGBA(f32), bitmap_pixel_count),
     };
-    std.mem.set(u8, bitmap.pixels, 0);
+    const null_pixel = graphics.RGBA(f32){
+        .r = 0.0,
+        .g = 0.0,
+        .b = 0.0,
+        .a = 0.0,
+    };
+    std.mem.set(graphics.RGBA(f32), bitmap.pixels, null_pixel);
 
     std.log.info("Rasterizing image of dimensions: {d} x {d}", .{ bitmap.width, bitmap.height });
     const printf = std.debug.print;
@@ -1864,618 +1755,275 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                 };
 
                 if (scanline_start.isCurve()) {
-                    // Scenarios:
-                    //   1. Start of curve (End point)
-                    //   2. Start of curve (Inflection point)
-                    //   3. Continuation of curve
-                    //      We can use current horizontal intersection with previous intersection to approximate
-                    //      coverage. For more accuracy, we can calculate additional t values between both intersections
-
-                    // Check if we have a previous intersection
-                    // TODO: Might be cleaner to return just the x, and have the y value 
-                    //       be implied. Otherwise it's a bit confusing to be using this 
-                    //       pre-determined, normalized y value
-                    const previous_entry_point_opt: ?Point(f64) = blk: {
-                        const target_outline_i = scanline_start.outline_index;
-                        for (previous_scanline.bufferSlice()) |intersection, intersection_i| {
-                            // NOTE: There could be two previous intersections for the current curve
-                            //       We need to make sure to select the "entry" one.
-                            //       I.e The first intersection that begins the fill range
-                            if ((intersection_i % 2 == 0) and intersection.outline_index == target_outline_i) {
-                                break :blk Point(f64){
-                                    .x = intersection.x_position,
-                                    .y = 1.0,
-                                };
-                            }
+                    const end_point_opt = blk: {
+                        const left = line_start.left;
+                        const right = line_start.right;
+                        if (@floatToInt(u32, @floor(left.x)) == start_x and @floatToInt(u32, @floor(left.y)) == scanline_y_index) {
+                            break :blk line_start.left;
+                        }
+                        if (@floatToInt(u32, @floor(right.x)) == start_x and @floatToInt(u32, @floor(right.y)) == scanline_y_index) {
+                            break :blk line_start.right;
                         }
                         break :blk null;
                     };
 
-                    if (previous_entry_point_opt != null and @floatToInt(u32, @floor(previous_entry_point_opt.?.x)) == start_x) {
-                        const previous_entry_point = previous_entry_point_opt.?;
-                        // The x-value might lie to the right or the left of our current pixel
-                        // If that's the case, we need to use it to calculate another point
-                        // that lies within our pixel boundry
-                        // const x_pixel = @floatToInt(u32, @floor(previous_entry_point.x));
-                        const is_positive = (previous_entry_point.x > scanline_start.x_position);
-                        // if (x_pixel == start_x) {
-                            // TODO: This isn't super precise as it's using a line estimation per
-                            //       pixel. It would be better to calculate a couple more curve points
-                            const exit_intersection = Point(f64){
-                                .x = previous_entry_point.x - @floor(scanline_start.x_position),
-                                .y = previous_entry_point.y,
-                            };
-                            std.debug.assert(exit_intersection.x >= 0.0);
-                            std.debug.assert(exit_intersection.x <= 1.0);
-                            std.debug.assert(exit_intersection.y >= 0.0);
-                            std.debug.assert(exit_intersection.y <= 1.0);
-
-                            std.debug.assert(entry_intersection.y == 0.0);
-                            std.debug.assert(entry_intersection.x >= 0.0);
-                            std.debug.assert(entry_intersection.x <= 1.0);
-
-                            // Because we know our exit y is 1.0, and entry y is 0.0 at this point,  
-                            // we can use a more specific coverage calculation 
-                            const average_x = (entry_intersection.x + exit_intersection.x) / 2.0; 
-                            const coverage = if(is_positive) 1.0 - average_x else average_x;
-                            bitmap.pixels[@intCast(usize, start_x) + (image_y_index * dimensions.width)] = @floatToInt(u8, 255.0 * coverage);
-                            full_fill_index_start = start_x + 1;
-                        // } else {
-
-                            // const increment: i32 = if (is_positive) 1 else -1;
-                            // const aa_start_x = @intCast(i32, start_x);
-                            // const aa_end_x = @intCast(i32, x_pixel) + increment;
-
-                            // var start_point = Point(f64){
-                            //     .x = @rem(scanline_start.x_position, 1.0),
-                            //     .y = 0.0,
-                            // };
-                            // // Total distance between entry point and previous intersection
-                            // // As we advance to the left, this total diff calculation
-                            // // will be one pixel less
-                            // const total_x_diff: f64 = abs(scanline_start.x_position - previous_entry_point.x);
-                            // const remaining_x = if (is_positive) 1.0 - start_point.x else start_point.x;
-                            // // std.log.info("Range {d} -> {d}. Positive {} Distance {d:.2}", .{ aa_start_x, aa_end_x - increment, is_positive, total_x_diff });
-                            // std.debug.assert(total_x_diff >= 0.0);
-                            // var x: i32 = aa_start_x;
-                            // while (x != aa_end_x) : (x += increment) {
-                            //     const iteration = if (is_positive) @intToFloat(f64, x - aa_start_x) else @intToFloat(f64, aa_start_x - x);
-                            //     const exit_y: f64 = @rem(remaining_x + iteration, total_x_diff) / total_x_diff;
-                            //     // std.log.info("{d}, Remaining x {d:.2}, exit_y {d:.2}", .{ iteration, remaining_x, exit_y });
-                            //     std.debug.assert(exit_y <= 1.0);
-                            //     std.debug.assert(exit_y >= 0.0);
-                            //     const exit_point = Point(f64){
-                            //         .x = if (is_positive) 1.0 else 0.0,
-                            //         .y = exit_y,
-                            //     };
-                            //     var coverage = calculateCoverage(start_point, exit_point, is_positive);
-                            //     if(!is_positive) {
-                            //         coverage = 1.0 - coverage;
-                            //     }
-                            //     bitmap.pixels[@intCast(usize, x) + (image_y_index * dimensions.width)] = @floatToInt(u8, 255.0 * coverage);
-                            //     start_point = Point(f64){
-                            //         .x = if (is_positive) 0.0 else 1.0,
-                            //         .y = exit_point.y,
-                            //     };
-                            // }
-                            // std.debug.assert(!is_positive or x >= 0);
-                            // full_fill_index_start = if(is_positive) @intCast(u32, x) else start_x + 1;
-                        // }
+                    if (end_point_opt) |end_point| {
+                        std.log.info("End point found for curve", .{});
+                        // This will require three points
+                        // 1. Current intersecion
+                        // 2. End point of current contour
+                        // 3. Exiting intersection of connecting contour
+                        _ = end_point;
+                        // TODO: Implement
+                        bitmap.pixels[@intCast(usize, start_x) + (image_y_index * dimensions.width)] = graphics.RGBA(f32){
+                            .r = 1.0,
+                            .g = 0.0,
+                            .b = 0.0,
+                            .a = 1.0,
+                        };
+                        full_fill_index_start = start_x + 1;
                     } else {
-                        const end_point_opt = blk: {
-                            const left = line_start.left;
-                            const right = line_start.right;
-                            if (@floatToInt(u32, @floor(left.x)) == start_x and @floatToInt(u32, @floor(left.y)) == scanline_y_index) {
-                                break :blk line_start.left;
-                            }
-                            if (@floatToInt(u32, @floor(right.x)) == start_x and @floatToInt(u32, @floor(right.y)) == scanline_y_index) {
-                                break :blk line_start.right;
-                            }
-                            break :blk null;
+                        //
+                        // Do leading AA with only an intersection point and a connecting curve
+                        // This is a non-optimized catch-all case for rasterizing a curve contour
+                        //
+                        var point_buffer: [128]Point(f64) = undefined;
+
+                        for (point_buffer) |*point| {
+                            point.* = Point(f64){
+                                .x = 99999,
+                                .y = 99999,
+                            };
+                        }
+
+                        var current_x_pixel = @floatToInt(usize, @floor(scanline_start.x_position));
+                        const scanline_end_x_pixel = @floatToInt(u32, @floor(scanline_end.x_position));
+                        // TODO: Previous point is a more precise name
+                        var last_point_rel = Point(f64){
+                            .x = scanline_start.x_position - @intToFloat(f64, current_x_pixel),
+                            .y = 0.0,
                         };
 
-                        if (end_point_opt) |end_point| {
-                            std.log.info("End point found for curve", .{});
-                            // This will require three points
-                            // 1. Current intersecion
-                            // 2. End point of current contour
-                            // 3. Exiting intersection of connecting contour
-                            _ = end_point;
-                            // TODO: Implement
-                            bitmap.pixels[@intCast(usize, start_x) + (image_y_index * dimensions.width)] = 155;
-                            full_fill_index_start = start_x + 1;
-                        } else {
-                            //
-                            // Do leading AA with only an intersection point and a connecting curve
-                            // This is a non-optimized catch-all case for rasterizing a curve contour
-                            //
-                            var point_buffer: [64]Point(f64) = undefined;
+                        point_buffer[0] = last_point_rel;
+                        var point_count: usize = 1;
 
-                            for(point_buffer) |*point| {
-                                point.* = Point(f64) {
-                                    .x = 99999,
-                                    .y = 99999,
+                        var contour_index = scanline_start.outline_index;
+                        const last_contour_index = scanline_end.outline_index;
+                        const last_t_opt = scanline_end.t;
+                        // TODO:
+                        std.debug.assert(contour_index > 0);
+                        const sv1 = vertices[contour_index];
+                        const sv2 = vertices[contour_index - 1];
+                        var bezier = BezierQuadratic{ .a = .{ .x = @intToFloat(f64, sv2.x) * scale, .y = @intToFloat(f64, sv2.y) * scale }, .b = .{ .x = @intToFloat(f64, sv1.x) * scale, .y = @intToFloat(f64, sv1.y) * scale }, .control = .{
+                            .x = @intToFloat(f64, sv1.control1_x) * scale,
+                            .y = @intToFloat(f64, sv1.control1_y) * scale,
+                        } };
+                        const t_start = scanline_start.t.?;
+                        const t_increment = 0.005;
+                        var current_t = t_start + t_increment;
+                        var is_line: bool = false;
+
+                        var itr: usize = 0;
+                        while (itr < 1000) : (itr += 1) {
+                            const sampled_point = quadraticBezierPoint(bezier, current_t);
+                            const sampled_pixel_x = @floatToInt(usize, @floor(sampled_point.x));
+                            var sampled_point_rel = Point(f64){
+                                .x = sampled_point.x - @intToFloat(f64, current_x_pixel),
+                                .y = sampled_point.y - scanline_y,
+                            };
+                            const sampled_pixel_y = @floatToInt(u32, @floor(sampled_point.y));
+
+                            // Sampled pixel is above scanline (End Anti-aliasing condition)
+                            if (sampled_pixel_y > scanline_y_index) {
+                                const change_in_y = sampled_point_rel.y - last_point_rel.y;
+                                const change_in_x = sampled_point_rel.x - last_point_rel.x;
+                                const remaining_y = 1.0 - last_point_rel.y;
+                                const y_percentage = remaining_y / change_in_y;
+                                std.debug.assert(remaining_y <= change_in_y);
+                                const interpolated_between_point = Point(f64){
+                                    .x = clamp(last_point_rel.x + (change_in_x * y_percentage), 0.0 + std.math.floatMin(f64), 1.0 - std.math.floatMin(f64)),
+                                    .y = 1.0,
                                 };
+                                std.debug.assert(interpolated_between_point.x <= 1.0);
+                                std.debug.assert(interpolated_between_point.x >= 0.0);
+                                point_buffer[point_count] = interpolated_between_point;
+                                const coverage = pixelCurveCoverage(point_buffer[0 .. point_count + 1]);
+                                std.log.info("Reached top of scanline. Interp point {d} {d}. Coverage: {d}", .{
+                                    interpolated_between_point.x,
+                                    interpolated_between_point.y,
+                                    coverage,
+                                });
+                                bitmap.pixels[current_x_pixel + (image_y_index * dimensions.width)] = pixelCurve(coverage); // @floatToInt(u8, 255 * coverage);
+                                break;
                             }
-                            
-                            var current_x_pixel = @floatToInt(usize, @floor(scanline_start.x_position));
-                            const scanline_end_x_pixel = @floatToInt(u32, @floor(scanline_end.x_position));
-                            // TODO: Previous point is a more precise name
-                            var last_point_rel = Point(f64) {
-                                .x = scanline_start.x_position - @intToFloat(f64, current_x_pixel),
-                                .y = 0.0,
-                            };
 
-                            point_buffer[0] = last_point_rel;
-                            var point_count: usize = 1;
-
-                            var contour_index = scanline_start.outline_index;
-                            const last_contour_index = scanline_end.outline_index;
-                            const last_t_opt = scanline_end.t;
-                            // TODO:
-                            std.debug.assert(contour_index > 0);
-                            const sv1 = vertices[contour_index];
-                            const sv2 = vertices[contour_index - 1];
-                            var bezier = BezierQuadratic {
-                                .a = .{ .x = @intToFloat(f64, sv2.x) * scale, .y = @intToFloat(f64, sv2.y) * scale },
-                                .b = .{ .x = @intToFloat(f64, sv1.x) * scale, .y = @intToFloat(f64, sv1.y) * scale },
-                                .control = .{
-                                    .x = @intToFloat(f64, sv1.control1_x) * scale,
-                                    .y = @intToFloat(f64, sv1.control1_y) * scale,
-                                }
-                            };
-                            const t_start = scanline_start.t.?;
-                            const t_increment = 0.005;
-                            var current_t = t_start + t_increment;
-                            var is_line: bool = false;
-
-                            // const ContourTag = enum {
-                            //     curve,
-                            //     line,
-                            // };
-
-                            // const LineContext = struct {
-                            //     start: Point(f64),
-                            //     end: Point(f64),
-                            //     slope: f64,
-                            //     is_positive: bool,
-                            // };
-
-                            // const CurveContext = struct {
-                            //     start_t: f64,
-                            //     current_t: f64,
-
-                            // }
-
-                            // const Contour = union(ContourTag) {
-                            //     curve: Curve,
-                            //     line: LineSegment,
-                            // };
-                            // var current_contour: Contour = undefined;
-
-                            var itr: usize = 0;
-                            while(itr < 1000) : (itr += 1) {
-
-                                // Hmm, maybe I need to make a generic generatePoints
-                                // block that works with lines and curves
-
-                                // if(is_line) {
-
-
-
-                                //     continue;
-                                // }
-
-                                const sampled_point = quadraticBezierPoint(bezier, current_t);
-                                const sampled_pixel_x = @floatToInt(usize, @floor(sampled_point.x));
-                                var sampled_point_rel = Point(f64) {
-                                    .x = sampled_point.x - @intToFloat(f64, current_x_pixel),
-                                    .y = sampled_point.y - scanline_y,
+                            // Sampled pixel is below scanline (End Anti-aliasing condition)
+                            if (sampled_pixel_y != scanline_y_index) {
+                                const change_in_y = last_point_rel.y - sampled_point_rel.y;
+                                const change_in_x = sampled_point_rel.x - last_point_rel.x;
+                                const remaining_y = last_point_rel.y;
+                                const y_percentage = remaining_y / change_in_y;
+                                std.debug.assert(remaining_y <= change_in_y);
+                                const interpolated_between_point = Point(f64){
+                                    .x = last_point_rel.x + (change_in_x * y_percentage),
+                                    .y = 0.0,
                                 };
-                                const sampled_pixel_y = @floatToInt(u32, @floor(sampled_point.y));
+                                std.debug.assert(interpolated_between_point.x <= 1.0);
+                                std.debug.assert(interpolated_between_point.x >= 0.0);
+                                point_buffer[point_count] = interpolated_between_point;
+                                const coverage = pixelCurveCoverage(point_buffer[0 .. point_count + 1]);
+                                std.log.info("Reached bottom of scanline. Interp point {d} {d}. Coverage: {d}", .{
+                                    interpolated_between_point.x,
+                                    interpolated_between_point.y,
+                                    coverage,
+                                });
+                                bitmap.pixels[current_x_pixel + (image_y_index * dimensions.width)] = pixelCurve(coverage); //  @floatToInt(u8, 255 * coverage);
+                                break;
+                            }
 
-                                // Sampled pixel is above scanline (End Anti-aliasing condition)
-                                if(sampled_pixel_y > scanline_y_index) {
-                                    const change_in_y = sampled_point_rel.y - last_point_rel.y;
-                                    const change_in_x = sampled_point_rel.x - last_point_rel.x;
-                                    const remaining_y = 1.0 - last_point_rel.y;
-                                    const y_percentage = remaining_y / change_in_y;
-                                    std.debug.assert(remaining_y <= change_in_y);
-                                    const interpolated_between_point = Point(f64) {
-                                        .x = clamp(last_point_rel.x + (change_in_x * y_percentage), 0.0 + std.math.floatMin(f64), 1.0 - std.math.floatMin(f64)),
-                                        .y = 1.0,
-                                    };
-                                    std.log.info("Reached top of scanline. Interp point {d} {d}", .{interpolated_between_point.x, interpolated_between_point.y});
-                                    std.debug.assert(interpolated_between_point.x <= 1.0);
-                                    std.debug.assert(interpolated_between_point.x >= 0.0);
-                                    point_buffer[point_count] = interpolated_between_point;
-                                    const coverage = pixelCurveCoverage(point_buffer[0..point_count + 1]);
-                                    bitmap.pixels[current_x_pixel + (image_y_index * dimensions.width)] = @floatToInt(u8, 255 * coverage);
-                                    break;
-                                }
-                                
-                                // Sampled pixel is below scanline (End Anti-aliasing condition)
-                                if(sampled_pixel_y != scanline_y_index) {
-                                    const change_in_y = last_point_rel.y - sampled_point_rel.y;
-                                    const change_in_x = sampled_point_rel.x - last_point_rel.x;
-                                    const remaining_y = last_point_rel.y;
-                                    const y_percentage = remaining_y / change_in_y;
-                                    std.debug.assert(remaining_y <= change_in_y);
-                                    const interpolated_between_point = Point(f64) {
-                                        .x = last_point_rel.x + (change_in_x * y_percentage),
-                                        .y = 0.0,
-                                    };
-                                    std.log.info("Reached bottom of scanline. Interp point {d} {d}", .{interpolated_between_point.x, interpolated_between_point.y});
-                                    std.debug.assert(interpolated_between_point.x <= 1.0);
-                                    std.debug.assert(interpolated_between_point.x >= 0.0);
-                                    point_buffer[point_count] = interpolated_between_point;
-                                    const coverage = pixelCurveCoverage(point_buffer[0..point_count + 1]);
-                                    bitmap.pixels[current_x_pixel + (image_y_index * dimensions.width)] = @floatToInt(u8, 255 * coverage);
-                                    break;
-                                }
+                            // Advance to right pixel
+                            if (sampled_pixel_x > current_x_pixel) {
+                                std.debug.assert(sampled_pixel_x == (current_x_pixel + 1));
+                                std.debug.assert(sampled_pixel_x <= scanline_end_x_pixel);
+                                // Interpolate point on the right x boundry, insert and calc coverage for current pixel
+                                const change_in_y: f64 = sampled_point_rel.y - last_point_rel.y;
+                                const remaining_x: f64 = 1.0 - last_point_rel.x;
+                                const change_in_x: f64 = sampled_point_rel.x - last_point_rel.x;
+                                std.debug.assert(change_in_x > 0.0);
+                                const x_percentage: f64 = remaining_x / change_in_x;
+                                std.debug.assert(x_percentage <= 1.0);
+                                std.debug.assert(x_percentage >= 0.0);
+                                const interpolated_between_point = Point(f64){
+                                    .x = 1.0,
+                                    .y = last_point_rel.y + (change_in_y * x_percentage),
+                                };
+                                point_buffer[point_count] = interpolated_between_point;
+                                const coverage = pixelCurveCoverage(point_buffer[0 .. point_count + 1]);
+                                std.log.info("Sampled pixel to right. Interp point {d} {d}. Coverage: {d}", .{
+                                    interpolated_between_point.x,
+                                    interpolated_between_point.y,
+                                    coverage,
+                                });
+                                bitmap.pixels[current_x_pixel + (image_y_index * dimensions.width)] = pixelCurve(coverage); //@floatToInt(u8, 255 * coverage);
 
-                                // Advance to right pixel
-                                if(sampled_pixel_x > current_x_pixel) {
-                                    std.debug.assert(sampled_pixel_x == (current_x_pixel + 1));
-                                    std.debug.assert(sampled_pixel_x <= scanline_end_x_pixel);
-                                    // Interpolate point on the right x boundry, insert and calc coverage for current pixel
-                                    const change_in_y: f64 = sampled_point_rel.y - last_point_rel.y;
-                                    const remaining_x: f64 = 1.0 - last_point_rel.x;
-                                    const change_in_x: f64 = sampled_point_rel.x - last_point_rel.x;
-                                    std.debug.assert(change_in_x > 0.0);
-                                    const x_percentage: f64 = remaining_x / change_in_x;
-                                    std.debug.assert(x_percentage <= 1.0);
-                                    std.debug.assert(x_percentage >= 0.0);
-                                    const interpolated_between_point = Point(f64) {
-                                        .x = 1.0,
-                                        .y = last_point_rel.y + (change_in_y * x_percentage),
-                                    };
-                                    std.log.info("Sampled pixel to right. Interp point {d} {d}", .{interpolated_between_point.x, interpolated_between_point.y});
-                                    point_buffer[point_count] = interpolated_between_point;
-                                    const coverage = pixelCurveCoverage(point_buffer[0..point_count + 1]);
-                                    bitmap.pixels[current_x_pixel + (image_y_index * dimensions.width)] = @floatToInt(u8, 255 * coverage);
+                                // Reset points buffer, our sampled point will be added as the first element below
+                                point_buffer[0] = Point(f64){ .x = 0.0, .y = interpolated_between_point.y };
+                                point_count = 1;
+                                current_x_pixel = sampled_pixel_x;
+                                sampled_point_rel.x -= 1.0;
+                            }
 
-                                    // Reset points buffer, our sampled point will be added as the first element below
-                                    point_buffer[0] = Point(f64) {
-                                        .x = 0.0,
-                                        .y = interpolated_between_point.y
-                                    };
-                                    point_count = 1;
-                                    current_x_pixel = sampled_pixel_x;
-                                    sampled_point_rel.x -= 1.0;
-                                }
+                            // Advance to left pixel
+                            if (sampled_pixel_x < current_x_pixel) {
+                                std.debug.assert(sampled_pixel_x == (current_x_pixel - 1));
+                                std.debug.assert(sampled_pixel_x >= 0);
+                                std.debug.assert(sampled_point_rel.x < 0);
+                                const change_in_y: f64 = sampled_point_rel.y - last_point_rel.y;
+                                const remaining_x: f64 = last_point_rel.x;
+                                const change_in_x: f64 = last_point_rel.x - sampled_point_rel.x;
+                                std.debug.assert(change_in_x > 0.0);
+                                const x_percentage: f64 = remaining_x / change_in_x;
+                                std.debug.assert(x_percentage <= 1.0);
+                                std.debug.assert(x_percentage >= 0.0);
+                                const interpolated_between_point = Point(f64){
+                                    .x = 0.0,
+                                    .y = last_point_rel.y + (change_in_y * x_percentage),
+                                };
 
-                                // Advance to left pixel
-                                if(sampled_pixel_x < current_x_pixel) {
-                                    std.debug.assert(sampled_pixel_x == (current_x_pixel - 1));
-                                    std.debug.assert(sampled_pixel_x >= 0);
-                                    std.debug.assert(sampled_point_rel.x < 0);
-                                    const change_in_y: f64 = sampled_point_rel.y - last_point_rel.y;
-                                    const remaining_x: f64 = last_point_rel.x;
-                                    const change_in_x: f64 = last_point_rel.x - sampled_point_rel.x;
-                                    std.debug.assert(change_in_x > 0.0);
-                                    const x_percentage: f64 = remaining_x / change_in_x;
-                                    std.debug.assert(x_percentage <= 1.0);
-                                    std.debug.assert(x_percentage >= 0.0);
-                                    const interpolated_between_point = Point(f64) {
-                                        .x = 0.0,
-                                        .y = last_point_rel.y + (change_in_y * x_percentage),
-                                    };
-                                    std.log.info("Sampled pixel to left. Interp point {d} {d}", .{interpolated_between_point.x, interpolated_between_point.y});
-                                    point_buffer[point_count] = interpolated_between_point;
-                                    const coverage = pixelCurveCoverage(point_buffer[0..point_count + 1]);
-                                    bitmap.pixels[current_x_pixel + (image_y_index * dimensions.width)] = @floatToInt(u8, 255 * coverage);
-                                    point_buffer[0] = Point(f64) {
-                                        .x = 1.0,
-                                        .y = interpolated_between_point.y
-                                    };
-                                    point_count = 1;
-                                    current_x_pixel = sampled_pixel_x;
-                                    sampled_point_rel.x += 1.0;
-                                }
+                                point_buffer[point_count] = interpolated_between_point;
+                                const coverage = pixelCurveCoverage(point_buffer[0 .. point_count + 1]);
+                                std.log.info("Sampled pixel to left. Interp point {d} {d}. Coverage: {d}", .{
+                                    interpolated_between_point.x,
+                                    interpolated_between_point.y,
+                                    coverage,
+                                });
+                                bitmap.pixels[current_x_pixel + (image_y_index * dimensions.width)] = pixelCurve(coverage); //@floatToInt(u8, 255 * coverage);
+                                point_buffer[0] = Point(f64){ .x = 1.0, .y = interpolated_between_point.y };
+                                point_count = 1;
+                                current_x_pixel = sampled_pixel_x;
+                                sampled_point_rel.x += 1.0;
+                            }
 
-                                std.log.info("Sample {d:.2} {d:.4} {d:.4}", .{point_count, sampled_point_rel.x, sampled_point_rel.y});
+                            // std.log.info("Sample {d:.2} {d:.4} {d:.4}", .{point_count, sampled_point_rel.x, sampled_point_rel.y});
 
-                                std.debug.assert(sampled_point_rel.x <= 1.0);
-                                std.debug.assert(sampled_point_rel.x >= 0.0);
-                                std.debug.assert(sampled_point_rel.y <= 1.0);
-                                std.debug.assert(sampled_point_rel.y >= 0.0);
+                            std.debug.assert(sampled_point_rel.x <= 1.0);
+                            std.debug.assert(sampled_point_rel.x >= 0.0);
+                            std.debug.assert(sampled_point_rel.y <= 1.0);
+                            std.debug.assert(sampled_point_rel.y >= 0.0);
 
-                                point_buffer[point_count] = sampled_point_rel;
-                                point_count += 1;
-                                current_t += t_increment;
+                            point_buffer[point_count] = sampled_point_rel;
+                            point_count += 1;
+                            current_t += t_increment;
 
-                                last_point_rel = sampled_point_rel;
+                            last_point_rel = sampled_point_rel;
 
-                                // T out of bounds, clip to final valid and continue
-                                if(last_t_opt) |last_t| {
-                                    if(contour_index == last_contour_index and current_t > last_t) {
-                                        if(current_t >= (last_t + t_increment)) {
-                                            break;
-                                        }
-                                        current_t = last_t;
-                                        continue;
-                                    }
-                                }
-
-                                if(current_t > (1.0 - t_increment)) {
-                                    current_t = 0;
-                                    contour_index = (contour_index + 1) % @intCast(u32, vertices.len);
-                                    // TODO: Handle gone past end contour index
-                                    const previous_contour = if(contour_index == 0) vertices.len - 1 else contour_index - 1;
-                                    const v1 = vertices[contour_index];
-                                    if(@intToEnum(VMove, v1.kind) == .move) {
-                                        std.debug.assert(false);
+                            // T out of bounds, clip to final valid and continue
+                            if (last_t_opt) |last_t| {
+                                if (contour_index == last_contour_index and current_t > last_t) {
+                                    if (current_t >= (last_t + t_increment)) {
                                         break;
                                     }
-                                    if(@intToEnum(VMove, v1.kind) == .line) {
-                                        const slope: f64 = 2.0;
-                                        const line_start_point = Point(f64) {
-                                            .x = v1.x * scale,
-                                            .y = v1.y * scale,
-                                        };
-                                        // How to calculate coverage for both line and curve within pixel..
-                                        // IDEA! You can scale the curve samples so that they fit into an imaginary
-                                        // pixel and do coverage as normal. Then scale down the coverage, calculate
-                                        // the area for the line segment and add
-                                        const exit_rel = pixelLineIntersection(slope, line_start_point);
-                                        is_line = true;
-                                        continue;
-                                    }
-                                    const v2 = vertices[previous_contour];
-                                    bezier = BezierQuadratic {
-                                        .a = .{ .x = @intToFloat(f64, v2.x) * scale, .y = @intToFloat(f64, v2.y) * scale },
-                                        .b = .{ .x = @intToFloat(f64, v1.x) * scale, .y = @intToFloat(f64, v1.y) * scale },
-                                        .control = .{
-                                            .x = @intToFloat(f64, v1.control1_x) * scale,
-                                            .y = @intToFloat(f64, v1.control1_y) * scale,
-                                        }
-                                    };
+                                    current_t = last_t;
+                                    continue;
                                 }
                             }
 
+                            if (current_t > (1.0 - t_increment)) {
+                                current_t = 0;
+                                contour_index = (contour_index + 1) % @intCast(u32, vertices.len);
+                                // TODO: Handle gone past end contour index
+                                const previous_contour = if (contour_index == 0) vertices.len - 1 else contour_index - 1;
+                                const v1 = vertices[contour_index];
+                                if (@intToEnum(VMove, v1.kind) == .move) {
+                                    std.debug.assert(false);
+                                    break;
+                                }
+                                if (@intToEnum(VMove, v1.kind) == .line) {
+                                    // const slope: f64 = 2.0;
+                                    // const line_start_point = Point(f64) {
+                                    //     .x = v1.x * scale,
+                                    //     .y = v1.y * scale,
+                                    // };
+                                    // How to calculate coverage for both line and curve within pixel..
+                                    // IDEA! You can scale the curve samples so that they fit into an imaginary
+                                    // pixel and do coverage as normal. Then scale down the coverage, calculate
+                                    // the area for the line segment and add
+                                    // It's a massive pain, but technically you could calculate how much the line
+                                    // intersects with the imaginary pixel, and subtract it.
+                                    // For now.. You can add an assert I think. Very unlikely to have that shape
+                                    // Hmm. Maybe you should think about what kind of crazy bezier curves could technically
+                                    // be within a pixel. Almost a circle.
+                                    // const exit_rel = pixelLineIntersection(slope, line_start_point);
+                                    // Need to be able to calculate the bounding box of the bezier at a t range
+                                    // Then to cut the pixel, you need to be able move one side inwards so that it
+                                    // can intersect with the endpoint without going inside the bounding box
+                                    // If you cut 0.5 off say horizontally, multiply all x values by 2
+                                    // You can actually do the same for the line, seeing as it helps to view things
+                                    // as entry and exit intersections to a pixel
 
-                        //     const t_start = scanline_start.t.?;
-                        //     // TODO: Factor in t_end
+                                    // Also.. To see how the rest of the code fares, you can just set the pixel to a random
+                                    // value and break.
 
-                        //     var contour_index = scanline_start.outline_index;
-                        //     var x = @floatToInt(i32, @floor(scanline_start.x_position));
-
-                        //     // You should be able to approximate length of curve, and then 
-                        //     // calculate a t_increment that corresponds x times per pixel
-                        //     const t_increment: f64 = 0.01;
-                        //     const end_x = @floatToInt(u32, @floor(scanline_end.x_position));
-                        //     var current_t = t_start + t_increment;
-                        //     // We can assume the curve is positive, and we end the leading AA phase when it turns negative
-                        //     // while(contour_index <= scanline_end.outline_index) : (contour_index += 1) {
-                        //     var coverage_accumulator: f64 = 0;
-                        //     const current_contour = vertices[contour_index];
-                            
-                        //     // NOTE: Order of bezier points matter! Otherwise you'll get inverted results when 
-                        //     //       calculating an intersection point at t. Therefore we have to use contour 
-                        //     //       order instead of sorting by x (I.e using line_start)
-                        //     // TODO: contour_index could be 0
-                        //     const sv1 = vertices[contour_index];
-                        //     const sv2 = vertices[contour_index - 1];
-                        //     var bezier = BezierQuadratic {
-                        //         .a = .{ .x = @intToFloat(f64, sv2.x) * scale, .y = @intToFloat(f64, sv2.y) * scale },
-                        //         .b = .{ .x = @intToFloat(f64, sv1.x) * scale, .y = @intToFloat(f64, sv1.y) * scale },
-                        //         .control = .{
-                        //             .x = @intToFloat(f64, current_contour.control1_x) * scale,
-                        //             .y = @intToFloat(f64, current_contour.control1_y) * scale,
-                        //         }
-                        //     };
-
-                        //     var last_point = Point(f64) {
-                        //         .x = scanline_start.x_position - @intToFloat(f64, x),
-                        //         .y = 0.0,
-                        //     };
-
-                        //     std.log.info("Initial last_point {d} {d} with t {d}", .{last_point.x, last_point.y, t_start});
-
-                        //     std.debug.assert(last_point.x <= 1.0);
-                        //     std.debug.assert(last_point.x >= 0.0);
-
-                        //     std.debug.assert(last_point.y <= 1.0);
-                        //     std.debug.assert(last_point.y >= 0.0);
-
-                        //     // Rasterize curve from left to right or right to left
-                        //     //  Assumed conditions:
-                        //     //  1. The curve stays within the y boundries for the scanline (Between 0 and 1)
-                        //     //  2. Positive winding order
-                        //     while(x <= end_x and x >= 0) {
-                        //         std.debug.assert(last_point.y <= 1.0);
-                        //         std.debug.assert(last_point.y >= 0.0);
-
-                        //         std.log.info("T: {d} Contour: {d}", .{current_t, contour_index});
-
-                        //         if(current_t > 1.0) {
-                        //             std.debug.assert(false);
-                        //             current_t = 1.0;
-                        //         }
-
-                        //         // Q: Is it possible for direction to change with y pixel ?
-
-                        //         var sampled_point = quadraticBezierPoint(bezier, current_t);
-
-                        //         const sampled_point_rel = Point(f64) {
-                        //             .x = sampled_point.x - @intToFloat(f64, x),
-                        //             .y = sampled_point.y - scanline_y,
-                        //         };
-
-                        //         const sampled_y_pixel = @floatToInt(u32, @floor(sampled_point.y));
-                        //         const x_pixel = @floatToInt(u32, @floor(sampled_point.x));
-                                
-                        //         std.log.info("Sampled point {d} {d} or {d} {d} at x {d}", .{
-                        //             sampled_point.x, sampled_point.y, 
-                        //             sampled_point_rel.x, sampled_point_rel.y, 
-                        //             x
-                        //         });
-
-                        //         const left_to_right = sampled_point_rel.x > last_point.x;
-                        //         // std.debug.assert(sampled_point_rel.y >= last_point.y);
-                        //         // std.debug.assert(sampled_point_rel.y != last_point.y);
-
-                        //         if(sampled_y_pixel != scanline_y_index) {
-                        //             //
-                        //             // Curve entered at bottom, exited at top
-                        //             //
-                        //             const y_len = sampled_point_rel.y - last_point.y;
-                        //             std.debug.assert(y_len >= 0.0);
-                        //             const x_len = sampled_point_rel.x - last_point.x;
-                        //             const remaining_y = 1.0 - last_point.y;
-                        //             std.debug.assert(remaining_y <= y_len);
-
-                        //             const interpolated_sample_point = Point(f64) {
-                        //                 .y = 1.0,
-                        //                 .x = last_point.x + (x_len * (remaining_y / y_len)),
-                        //             };
-
-                        //             std.debug.assert(interpolated_sample_point.x <= 1.0);
-                        //             std.debug.assert(interpolated_sample_point.x >= 0.0);
-
-                        //             // Y out of bounds. Finish calculating our current pixel coverage
-                        //             // and break.
-                        //             const corner_point = Point(f64) {
-                        //                 .x = if(is_positive) 1.0 else 0.0,
-                        //                 .y = 0.0,
-                        //             };
-                        //             coverage_accumulator += triangleArea(corner_point, last_point, interpolated_sample_point);
-                        //             last_point = Point(f64) {
-                        //                 .x = if(is_positive) 1.0 else 0.0,
-                        //                 .y = 1.0,
-                        //             };
-                        //             coverage_accumulator += triangleArea(corner_point, last_point, sampled_point_rel);
-                        //             if(!is_positive) {
-                        //                 coverage_accumulator = 1.0 - coverage_accumulator;
-                        //             }
-                        //             if(coverage_accumulator > 1.0) {
-                        //                 std.debug.assert(false);
-                        //                 coverage_accumulator = 1.0;
-                        //             }
-                        //             std.debug.assert(coverage_accumulator <= 1.0);
-                        //             bitmap.pixels[@intCast(usize, x) + (image_y_index * dimensions.width)] = @floatToInt(u8, 255.0 * coverage_accumulator);
-                        //             break;   
-                        //         }
-
-                        //         // std.log.info("Sampled: point {d} {d} at x {d}", .{sampled_point.x, sampled_point.y, x});
-                        //         if(sampled_y_pixel != scanline_y_index) {
-                        //             std.log.info("Break condition: Y out of bounds", .{});
-                        //             break;
-                        //         }
-                                
-                        //         std.debug.assert(sampled_y_pixel == scanline_y_index);
-
-                        //         if(x_pixel == x) {
-                        //             const corner_point = Point(f64) {
-                        //                 .x = if(is_positive) 1.0 else 0.0,
-                        //                 .y = 0.0,
-                        //             };
-                        //             coverage_accumulator += triangleArea(corner_point, last_point, sampled_point_rel);
-                        //             std.debug.assert(coverage_accumulator <= 1.0);
-                        //             std.debug.assert(coverage_accumulator >= 0.0);
-                        //             last_point = sampled_point_rel;
-                        //         } else {
-                        //             // 
-                        //             // Our sampled point lies in the pixel to the left or right of our current
-                        //             // We'll interpolate a new sampled point between last_point and sampled_point
-                        //             // that lies on the y boundry (0.0 or 1.0). This will be the last point used to calculate 
-                        //             // the total coverage for our current pixel. We'll set the pixel value and then
-                        //             // use our original sampled value, along with our interpolated point to 
-                        //             // calulate the first area triangle for our new pixel.
-                        //             //
-                        //             // Linear interpolatation is used to estimate the y value that corresponds to our new x value
-                        //             //
-
-                        //             std.log.info("sampled x is in next pixel boundry. is_pos {}", .{is_positive});
-
-                        //             const change_in_y = sampled_point_rel.y - last_point.y;
-                        //             const remaining_x = if(is_positive) 1.0 - last_point.x else last_point.x;
-                        //             const range_x = abs(sampled_point_rel.x - last_point.x);
-
-                        //             std.log.info("change_in_y {d} remaining_x {d} range_x {d}", .{change_in_y, remaining_x, range_x});
-
-                        //             std.debug.assert(range_x > 0.0);
-
-                        //             const x_percentage = remaining_x / range_x;
-                        //             std.debug.assert(x_percentage <= 1.0);
-                        //             std.debug.assert(x_percentage >= 0.0);
-                        //             const interpolated_between_point = Point(f64) {
-                        //                 .x = if(is_positive) 1.0 else 0.0,
-                        //                 .y = last_point.y + (change_in_y * x_percentage),
-                        //             };
-                        //             std.debug.assert(interpolated_between_point.y <= 1.0);
-                        //             std.debug.assert(interpolated_between_point.y >= 0.0);
-
-                        //             const corner_point = Point(f64) {
-                        //                 .x = if(is_positive) 1.0 else 0.0,
-                        //                 .y = 0.0,
-                        //             };
-                        //             coverage_accumulator += triangleArea(corner_point, last_point, sampled_point_rel);
-
-                        //             std.debug.assert(coverage_accumulator <= 1.0);
-                        //             std.debug.assert(coverage_accumulator >= 0.0);
-
-                        //             if(!is_positive) {
-                        //                 coverage_accumulator = 1.0 - coverage_accumulator;
-                        //             }
-                        //             std.log.info("Coverage: {d}", .{coverage_accumulator});
-                        //             bitmap.pixels[@intCast(usize, x) + (image_y_index * dimensions.width)] = @floatToInt(u8, 255.0 * coverage_accumulator);
-
-                        //             x = if(is_positive) x + 1 else x - 1;
-
-                        //             // We're guarding here as next x could be beyond our valid AA range.
-                        //             // NOTE: If this branch isn't taken, this is the last iteration
-                        //             if(x <= end_x and x >= 0) {
-                        //                 last_point = Point(f64) {
-                        //                     .x = if(is_positive) 0.0 else 1.0,
-                        //                     .y = interpolated_between_point.y,
-                        //                 };
-                        //                 coverage_accumulator = triangleArea(corner_point, last_point, sampled_point_rel);
-                        //             }
-                        //         }
-                        //         if(current_t > (1.0 - t_increment)) {
-                        //             current_t = t_increment;
-                        //             // TODO: This doesn't work. We can't do anything with .move vertices nor do we 
-                        //             //       have support for lines
-                        //             contour_index = (contour_index + 1) % @intCast(u32, vertices.len);
-                        //             const previous_contour = if(contour_index == 0) vertices.len - 1 else contour_index - 1;
-                        //             const v1 = vertices[contour_index];
-
-                        //             if(@intToEnum(VMove, v1.kind) == .move) {
-                        //                 std.debug.assert(false);
-                        //                 break;
-                        //             }
-
-                        //             if(@intToEnum(VMove, v1.kind) == .line) {
-                        //                 // TODO:
-                        //                 std.log.info("Line connect", .{});
-                        //                 bitmap.pixels[@intCast(usize, x) + (image_y_index * dimensions.width)] = 150;
-                        //                 break;
-                        //             }
-
-                        //             const v2 = vertices[previous_contour];
-                        //             bezier = BezierQuadratic {
-                        //                 .a = .{ .x = @intToFloat(f64, v2.x) * scale, .y = @intToFloat(f64, v2.y) * scale },
-                        //                 .b = .{ .x = @intToFloat(f64, v1.x) * scale, .y = @intToFloat(f64, v1.y) * scale },
-                        //                 .control = .{
-                        //                     .x = @intToFloat(f64, v1.control1_x) * scale,
-                        //                     .y = @intToFloat(f64, v1.control1_y) * scale,
-                        //                 }
-                        //             };
-                        //         } else {
-                        //             current_t += t_increment;
-                        //         }
-                        //     }
-                        //     std.debug.assert(x >= 0);
-                        //     const start_x_pixel = @floatToInt(u32, @floor(scanline_start.x_position));
-                        //     full_fill_index_start = if(x >= start_x_pixel) @intCast(u32, x) else start_x_pixel + 1;
+                                    // Also x2.. Modify this function to return a colored image, that way you can use it to debug
+                                    // what parts of the code are responsable for drawing what parts..
+                                    is_line = true;
+                                    // continue;
+                                    break;
+                                }
+                                const v2 = vertices[previous_contour];
+                                bezier = BezierQuadratic{ .a = .{ .x = @intToFloat(f64, v2.x) * scale, .y = @intToFloat(f64, v2.y) * scale }, .b = .{ .x = @intToFloat(f64, v1.x) * scale, .y = @intToFloat(f64, v1.y) * scale }, .control = .{
+                                    .x = @intToFloat(f64, v1.control1_x) * scale,
+                                    .y = @intToFloat(f64, v1.control1_y) * scale,
+                                } };
+                            }
                         }
+                        const start_x_pixel = @floatToInt(u32, @floor(scanline_start.x_position));
+                        full_fill_index_start = if (current_x_pixel >= start_x_pixel) @intCast(u32, current_x_pixel + 1) else start_x_pixel + 1;
                     }
                 } else if (line_start.isVertical()) {
                     // std.log.info("  Vertical found", .{});
-                    const coverage = @floatToInt(u8, (1.0 - @rem(scanline_start.x_position, 1.0)) * 255);
-                    bitmap.pixels[start_x + (image_y_index * dimensions.width)] = coverage;
+                    // const coverage = @floatToInt(u8, (1.0 - @rem(scanline_start.x_position, 1.0)) * 255);
+                    bitmap.pixels[start_x + (image_y_index * dimensions.width)] = pixelFill(1.0 - @rem(scanline_start.x_position, 1.0)); // coverage;
                     full_fill_index_start = start_x + 1;
                 } else {
                     //
@@ -2527,7 +2075,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                         };
                         const coverage = calculateCoverage(entry_intersection, exit_intersection, is_positive);
                         const x_pos = @intCast(usize, current_x);
-                        bitmap.pixels[x_pos + (image_y_index * dimensions.width)] = @floatToInt(u8, 255.0 * coverage);
+                        bitmap.pixels[x_pos + (image_y_index * dimensions.width)] = pixelFill(coverage); //@floatToInt(u8, 255.0 * coverage);
 
                         // std.log.info("Current: {d} end {d}", .{ current_x, end_x });
 
@@ -2554,13 +2102,13 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                 const start_x = @floatToInt(u32, @floor(scanline_end.x_position));
                 if (scanline_end.isCurve()) {
                     // std.log.info("  Curve found", .{});
-                    const coverage = @floatToInt(u8, (@rem(scanline_end.x_position, 1.0)) * 255);
-                    bitmap.pixels[start_x + (image_y_index * dimensions.width)] = coverage;
+                    // const coverage = @floatToInt(u8, (@rem(scanline_end.x_position, 1.0)) * 255);
+                    bitmap.pixels[start_x + (image_y_index * dimensions.width)] = pixelFill(@rem(scanline_end.x_position, 1.0)); //coverage;
                     full_fill_index_end = if (start_x == 0) (full_fill_index_start + 1) else start_x - 1;
                 } else if (line_end.isVertical()) {
                     // std.log.info("  Vertical found", .{});
-                    const coverage = @floatToInt(u8, (@rem(scanline_end.x_position, 1.0)) * 255);
-                    bitmap.pixels[start_x + (image_y_index * dimensions.width)] = coverage;
+                    // const coverage = @floatToInt(u8, (@rem(scanline_end.x_position, 1.0)) * 255);
+                    bitmap.pixels[start_x + (image_y_index * dimensions.width)] = pixelFill(@rem(scanline_end.x_position, 1.0)); //coverage;
                     full_fill_index_end = if (start_x == 0) (full_fill_index_start + 1) else start_x - 1;
                 } else {
                     const direction = line_end.direction();
@@ -2606,7 +2154,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                             };
                         };
                         const coverage = calculateCoverage(entry_intersection, exit_intersection, is_positive);
-                        bitmap.pixels[@intCast(usize, current_x) + (image_y_index * dimensions.width)] = @floatToInt(u8, 255.0 * (1.0 - coverage));
+                        bitmap.pixels[@intCast(usize, current_x) + (image_y_index * dimensions.width)] = pixelFill(1.0 - coverage); // @floatToInt(u8, 255.0 * (1.0 - coverage));
 
                         if (((current_x + increment) == end_x) or exit_intersection.y == 1.0) {
                             full_fill_index_end = if (is_positive) start_x - 1 else @intCast(u32, current_x - 1);
@@ -2633,352 +2181,13 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
 
             var current_x = full_fill_index_start;
             while (current_x <= full_fill_index_end) : (current_x += 1) {
-                bitmap.pixels[current_x + (image_y_index * dimensions.width)] = 255;
+                bitmap.pixels[current_x + (image_y_index * dimensions.width)] = pixelFill(1.0); // 255;
             }
         }
         const temp_buffer = previous_scanline.buffer;
         previous_scanline = current_scanline;
         current_scanline.buffer = temp_buffer;
         current_scanline.reset();
-    }
-    return bitmap;
-}
-
-fn rasterize2(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
-    {
-        // quadraticBezierPlaneIntersection2
-        const b = BezierQuadratic{
-            .a = .{ .x = 0.0, .y = 0.0 },
-            .b = .{
-                .x = 12,
-                .y = 8,
-            },
-            .control = .{
-                .x = 0,
-                .y = 8,
-            },
-        };
-        std.debug.assert(quadraticBezierPlaneIntersection2(6, b) == 3);
-    }
-
-    {
-        const b = BezierQuadratic{
-            .a = .{ .x = 0.0, .y = 0.0 },
-            .b = .{
-                .x = 20,
-                .y = 0,
-            },
-            .control = .{
-                .x = 10,
-                .y = 10,
-            },
-        };
-        std.debug.assert(quadradicBezierInflectionPoint(b).x == 10);
-        std.debug.assert(quadradicBezierInflectionPoint(b).y == 5);
-    }
-
-    {
-        const b = BezierQuadratic{
-            .a = .{ .x = 0.0, .y = 0.0 },
-            .b = .{
-                .x = 20,
-                .y = 0,
-            },
-            .control = .{
-                .x = 14,
-                .y = -8,
-            },
-        };
-        std.debug.assert(quadradicBezierInflectionPoint(b).x == 12);
-        std.debug.assert(quadradicBezierInflectionPoint(b).y == -4);
-    }
-
-    {
-        const b = BezierQuadratic{
-            .a = .{ .x = 10.0, .y = 0.0 },
-            .b = .{
-                .x = 200,
-                .y = 15,
-            },
-            .control = .{
-                .x = 40,
-                .y = 40,
-            },
-        };
-        std.debug.assert(quadraticBezierPoint(0.0, b).x == 10.0);
-        std.debug.assert(quadraticBezierPoint(1.0, b).x == 200.0);
-    }
-
-    // {
-    //     const b = BezierQuadratic{
-    //         .a = .{ .x = 0.0, .y = 0.0 },
-    //         .b = .{
-    //             .x = 20.0,
-    //             .y = 0.0,
-    //         },
-    //         .control = .{
-    //             .x = 10.0,
-    //             .y = 10.0,
-    //         },
-    //     };
-    //     std.debug.assert(quadraticBezierPlaneIntersection(3.75, b) == 15.0);
-    // }
-
-    {
-        const point_a = Point(f64){
-            .x = 3.0,
-            .y = 8.0,
-        };
-        const point_b = Point(f64){
-            .x = 7.0,
-            .y = 12.0,
-        };
-        std.debug.assert(horizontalPlaneIntersection(0.0, point_a, point_b) == -5.0);
-    }
-
-    const scale_x = scale;
-    const scale_y = scale;
-
-    // std.log.info("Scale xy {d} {d}", .{scale_x, scale_y});
-
-    // glyph_dimensions.width = @intCast(u32, max_x - min_x);
-    // glyph_dimensions.height = @intCast(u32, max_y - min_y);
-
-    // const bitmap_aspect = @intToFloat(f32, dimensions.width) / @intToFloat(f32, dimensions.height);
-    // const glyph_aspect = @intToFloat(f32, glyph_dimensions.width) / @intToFloat(f32, glyph_dimensions.height);
-
-    // std.log.info("Bitmap aspect: {d}", .{bitmap_aspect});
-    // std.log.info("Glyph aspect: {d}", .{glyph_aspect});
-    std.log.info("Glyph bbox {d} x {d} -- {d} x {d}", .{ min_x, min_y, max_x, max_y });
-    // std.log.info("Scaled {d} x {d} -- {d} x {d}", .{@intToFloat(f32, min_x) * scale.x, @intToFloat(f32, min_y) * scale.x, @intToFloat(f32, max_x) * scale.x, @intToFloat(f32, max_y) * scale.x});
-
-    // std.debug.assert(bitmap_aspect == glyph_aspect);
-
-    var bitmap: Bitmap = .{
-        .width = @intCast(u32, dimensions.width),
-        .height = @intCast(u32, dimensions.height),
-        .pixels = (try allocator.alloc(u8, @intCast(usize, dimensions.width) * dimensions.height)),
-    };
-
-    std.mem.set(u8, bitmap.pixels, 0);
-
-    std.log.info("Rasterizing image of dimensions: {d} x {d}", .{ bitmap.width, bitmap.height });
-
-    // std.log.info("Calc full w size: {d} real {d}", .{dimensions.width * scale_x, glyph_dimensions.width});
-    // std.log.info("Calc full h size: {d} real {d}", .{dimensions.height * scale_y, glyph_dimensions.height});
-
-    // std.debug.assert(dimensions.width * scale_x == glyph_dimensions.width);
-    // std.debug.assert(dimensions.height * scale_y == glyph_dimensions.height);
-
-    const printf = std.debug.print;
-
-    var y: u32 = 0;
-    while (y < dimensions.height) : (y += 1) {
-        var intersections: [256]f64 = [1]f64{0} ** 256;
-        var intersection_count: u16 = 0;
-
-        printf("Y axis {d}\n", .{y});
-
-        // Loop through all vertices and store line intersections
-        var vertex_i: u32 = 1;
-        while (vertex_i < vertices.len) : (vertex_i += 1) {
-            const previous_vertex = vertices[vertex_i - 1];
-            const current_vertex = vertices[vertex_i];
-            const kind = @intToEnum(VMove, current_vertex.kind);
-
-            const point_a = Point(f64){ .x = @intToFloat(f64, current_vertex.x) * scale_x, .y = @intToFloat(f64, current_vertex.y) * scale_y };
-            const point_b = Point(f64){ .x = @intToFloat(f64, previous_vertex.x) * scale_x, .y = @intToFloat(f64, previous_vertex.y) * scale_y };
-
-            if (kind == .line) {
-                printf("  Vertex (line) {d:.4} x {d:.4} --> {d:.4} x {d:.4} -- ", .{ point_a.x, point_a.y, point_b.x, point_b.y });
-            } else if (kind == .curve) {
-                printf("  Vertex (curve) A({d:.2}, {d:.2}) --> B({d:.2}, {d:.2}) C ({d:.2}, {d:.2}) -- ", .{
-                    point_a.x,
-                    point_a.y,
-                    point_b.x,
-                    point_b.y,
-                    @intToFloat(f64, current_vertex.control1_x) * scale_x,
-                    @intToFloat(f64, current_vertex.control1_y) * scale_y,
-                });
-            }
-
-            const is_horizontal = current_vertex.y == previous_vertex.y;
-            const is_outsize_y_range = blk: {
-                const max_yy = max(f64, point_a.y, point_b.y);
-                const min_yy = min(f64, point_a.y, point_b.y);
-                std.debug.assert(max_yy >= min_yy);
-                const y_float = @intToFloat(f64, y);
-                if (y_float > max_yy or y_float < min_yy) {
-                    break :blk true;
-                }
-                if (kind == .curve) {
-                    const bezier = BezierQuadratic{ .a = point_a, .b = point_b, .control = .{
-                        .x = @intToFloat(f64, current_vertex.control1_x) * scale_x,
-                        .y = @intToFloat(f64, current_vertex.control1_y) * scale_y,
-                    } };
-                    const inflection_y = quadradicBezierInflectionPoint(bezier).y;
-                    const is_middle_higher = (inflection_y > max_yy) and y_float > inflection_y;
-                    const is_middle_lower = (inflection_y < min_yy) and y_float < inflection_y;
-                    if (is_middle_higher or is_middle_lower) {
-                        break :blk true;
-                    }
-                }
-                break :blk false;
-            };
-
-            if (is_horizontal) {
-                printf("REJECT - Horizonatal line\n", .{});
-                continue;
-            }
-
-            if (is_outsize_y_range) {
-                printf("REJECT - Outsize Y range\n", .{});
-                continue;
-            }
-
-            if (kind == .line and point_a.x == point_b.x) {
-                intersections[intersection_count] = point_a.x;
-                printf("Horizontal Intersection added at X index {d}\n", .{intersections[intersection_count]});
-                intersection_count += 1;
-                continue;
-            }
-
-            if (kind == .curve) {
-                const bezier = BezierQuadratic{ .a = point_a, .b = point_b, .control = .{
-                    .x = @intToFloat(f64, current_vertex.control1_x) * scale_x,
-                    .y = @intToFloat(f64, current_vertex.control1_y) * scale_y,
-                } };
-                const optional_intersection_points = quadraticBezierPlaneIntersections3(bezier, @intToFloat(f64, y));
-
-                // The plane will intersect twice with the part of the bezier curve that is between the highest / lowest
-                // end point, and the inflection point
-
-                // const curve_intersection_count: u16 = blk: {
-                //     const y_float = @intToFloat(f64, y);
-                //     const inflection_y = quadradicBezierInflectionPoint(bezier).y;
-
-                //     std.log.info("Inflection y: {d}", .{inflection_y});
-
-                //     const max_yy = max(f64, point_a.y, point_b.y);
-                //     const min_yy = min(f64, point_a.y, point_b.y);
-
-                //     // Inflection point lies between the end points.
-                //     // This means it will not change direction mid-curve
-                //     if(inflection_y >= min_yy and inflection_y <= max_yy) {
-                //         break :blk 1;
-                //     }
-
-                //     const is_above = (inflection_y > bezier.a.y and inflection_y > bezier.b.y);
-                //     if(is_above and y_float >= max_yy and y_float <= inflection_y) {
-                //         break :blk 2;
-                //     }
-
-                //     if(!is_above and y_float <= min_yy and y_float >= inflection_y) {
-                //         break :blk 2;
-                //     }
-
-                //     break :blk 1;
-                // };
-
-                if (optional_intersection_points[0]) |first_intersection| {
-                    intersections[intersection_count] = first_intersection;
-                    printf("Intersection (curve) added at X {d}\n", .{intersections[intersection_count]});
-                    intersection_count += 1;
-                    if (optional_intersection_points[1]) |second_intersection| {
-                        intersections[intersection_count] = second_intersection;
-                        printf("Intersection (curve) added at X {d}\n", .{intersections[intersection_count]});
-                        intersection_count += 1;
-                    }
-                } else if (optional_intersection_points[1]) |second_intersection| {
-                    intersections[intersection_count] = second_intersection;
-                    printf("Intersection (curve) added at X {d}\n", .{intersections[intersection_count]});
-                    intersection_count += 1;
-                }
-
-                if (intersections[intersection_count] < 0) {
-                    std.debug.assert(false);
-                    intersections[intersection_count] = 0.0;
-                }
-            } else if (kind == .line) {
-                intersections[intersection_count] = horizontalPlaneIntersection(@intToFloat(f64, y), point_a, point_b);
-                if (intersections[intersection_count] < 0.0) {
-                    printf("Intersection out of range\n", .{});
-                    continue;
-                }
-                std.debug.assert(intersections[intersection_count] >= 0.0);
-                std.debug.assert(intersections[intersection_count] <= @intToFloat(f64, dimensions.width));
-                printf("Intersections added at X value {d}\n", .{intersections[intersection_count]});
-                intersection_count += 1;
-            } else {
-                std.log.info("Kind: {}", .{kind});
-                continue;
-                // unreachable;
-            }
-        }
-
-        {
-            // We have to sort
-            var step: usize = 1;
-            while (step < intersection_count) : (step += 1) {
-                const key = intersections[step];
-                var x: i64 = @intCast(i64, step) - 1;
-                while (x >= 0 and intersections[@intCast(usize, x)] > key) {
-                    intersections[@intCast(usize, x) + 1] = intersections[@intCast(usize, x)];
-                    x -= 1;
-                }
-                intersections[@intCast(usize, x + 1)] = key;
-            }
-        }
-
-        if (intersection_count == 0) {
-            continue;
-        }
-        std.debug.assert(intersection_count % 2 == 0);
-
-        var i: u32 = 0;
-        while (i < (intersection_count - 1)) : (i += 2) {
-            std.debug.assert(intersections[i] <= intersections[i + 1]);
-
-            std.log.info("Intersection {d}: {d} -- {d}", .{ i, intersections[i], intersections[i + 1] });
-
-            var start_pixel_index = @floatToInt(u32, @floor(intersections[i]));
-            const start_pixel_AA_value = @floatToInt(u8, (1.0 - @rem(intersections[i], 1.0)) * 255);
-            var end_pixel_index = @floatToInt(u32, @floor(intersections[i + 1]));
-            const end_pixel_AA_value = @floatToInt(u8, @rem(intersections[i + 1], 1.0) * 255);
-
-            if (start_pixel_index == end_pixel_index) {
-                const average_AA = @divFloor(@intCast(u16, start_pixel_AA_value) + end_pixel_AA_value, 2);
-                bitmap.pixels[start_pixel_index + (y * dimensions.width)] = @intCast(u8, average_AA);
-                continue;
-            }
-
-            if (start_pixel_index >= dimensions.width) {
-                std.log.err("Invalid start pixel: {d} {d}", .{ start_pixel_index, @intToFloat(f64, start_pixel_index) / scale_x });
-                start_pixel_index = dimensions.width - 1;
-                std.debug.assert(false);
-            }
-
-            if (end_pixel_index >= dimensions.width) {
-                std.log.info("Invalid end pixel index {d} max is {d}", .{ end_pixel_index, dimensions.width - 1 });
-                std.log.err("Invalid end pixel: {d} {d}", .{ end_pixel_index, @intToFloat(f64, end_pixel_index) / scale_x });
-                // end_pixel_index = dimensions.width - 1;
-                std.debug.assert(false);
-                end_pixel_index = dimensions.width - 1;
-            }
-
-            std.debug.assert(start_pixel_index < dimensions.width);
-            std.debug.assert(end_pixel_index < dimensions.width);
-
-            bitmap.pixels[start_pixel_index + (y * dimensions.width)] = start_pixel_AA_value;
-            bitmap.pixels[end_pixel_index + (y * dimensions.width)] = end_pixel_AA_value;
-
-            std.debug.assert(end_pixel_index >= start_pixel_index);
-
-            var x = start_pixel_index + 1;
-            while (x < end_pixel_index) : (x += 1) {
-                bitmap.pixels[x + (y * dimensions.width)] = 255;
-            }
-        }
     }
     return bitmap;
 }
@@ -3307,33 +2516,6 @@ pub fn initializeFont(allocator: Allocator, data: []u8) !FontInfo {
 
     const encoding_format: u16 = toNative(u16, @intToPtr(*u16, @ptrToInt(data.ptr) + font_info.cmap_encoding_table_offset).*, .Big);
     _ = encoding_format;
-
-    // Load CFF
-
-    // if(font_info.glyf != 0) {
-    // if(font_info.loca == 0) { return error.RequiredFontTableCmapMissing; }
-    // } else {
-
-    // var buffer: Buffer = undefined;
-    // var top_dict: Buffer = undefined;
-    // var top_dict_idx: Buffer = undefined;
-
-    // var cstype: u32 = 2;
-    // var char_strings: u32 = 0;
-    // var fdarrayoff: u32 = 0;
-    // var fdselectoff: u32 = 0;
-    // var cff: u32 = findTable(data, font_start, "CFF ");
-
-    // if(!cff) {
-    // return error.RequiredFontTableCffMissing;
-    // }
-
-    // font_info.font_dicts = Buffer.create();
-    // font_info.fd_select = Buffer.create();
-
-    // }
-    //
-
     return font_info;
 }
 
