@@ -13,6 +13,10 @@ const wayland = @import("wayland");
 const wl = wayland.client.wl;
 const xdg = wayland.client.xdg;
 
+const clib = @cImport({
+    @cInclude("dlfcn.h");
+});
+
 // TODO:
 // - Audit memory allocation overall
 // - Audit logging
@@ -131,8 +135,7 @@ const enable_blending = true;
 //   2. Globals
 //
 
-const asset_path_font = "./assets/Hack-Regular.ttf";
-// const asset_path_font = "/usr/share/fonts/noto/NotoSerif-Bold.ttf";
+const asset_path_font = "./assets/RobotoMono.ttf";
 
 var glyphs: GlyphSet = undefined;
 
@@ -311,10 +314,7 @@ var frame_duration_awake_ns: u64 = 0;
 //   3. Core Types + Functions
 //
 
-pub const VKProc = fn () callconv(.C) void;
-
-extern fn vkGetInstanceProcAddr(instance: vk.Instance, procname: [*:0]const u8) vk.PfnVoidFunction;
-extern fn vkGetPhysicalDevicePresentationSupport(instance: vk.Instance, pdev: vk.PhysicalDevice, queuefamily: u32) c_int;
+var vkGetInstanceProcAddr: fn (instance: vk.Instance, procname: [*:0]const u8) vk.PfnVoidFunction = undefined;
 
 const ScreenPixelBaseType = u16;
 const ScreenNormalizedBaseType = f32;
@@ -735,7 +735,20 @@ fn setup(allocator: std.mem.Allocator, app: *GraphicsContext) !void {
     const generate_glyph_atlas_duration = @intCast(u64, generate_glyph_atlas_end - generate_glyph_atlas_start);
     std.log.info("Font atlas generated in {}", .{std.fmt.fmtDuration(generate_glyph_atlas_duration)});
 
-    app.base_dispatch = try vulkan_config.BaseDispatch.load(vkGetInstanceProcAddr);
+    // TODO: This is linux specific
+    if (clib.dlopen("libvulkan.so", clib.RTLD_NOW)) |vulkan_loader| {
+        const vk_get_instance_proc_addr_fn_opt = @ptrCast(?fn (instance: vk.Instance, procname: [*:0]const u8) vk.PfnVoidFunction, clib.dlsym(vulkan_loader, "vkGetInstanceProcAddr"));
+        if (vk_get_instance_proc_addr_fn_opt) |vk_get_instance_proc_addr_fn| {
+            vkGetInstanceProcAddr = vk_get_instance_proc_addr_fn;
+            app.base_dispatch = try vulkan_config.BaseDispatch.load(vkGetInstanceProcAddr);
+        } else {
+            std.log.err("Failed to load vkGetInstanceProcAddr function from vulkan loader", .{});
+            return error.FailedToGetVulkanSymbol;
+        }
+    } else {
+        std.log.err("Failed to load vulkan loader (libvulkan.so)", .{});
+        return error.FailedToGetVulkanSymbol;
+    }
 
     app.instance = try app.base_dispatch.createInstance(&vk.InstanceCreateInfo{
         .p_application_info = &vk.ApplicationInfo{

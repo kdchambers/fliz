@@ -14,22 +14,20 @@ pub fn build(b: *Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardReleaseOptions();
 
-    // b.use_stage1 = false;
-
     const scanner = ScanProtocolsStep.create(b);
     scanner.addSystemProtocol("stable/xdg-shell/xdg-shell.xml");
 
     scanner.generate("xdg_wm_base", 3);
     scanner.generate("wl_compositor", 4);
-    scanner.generate("wl_seat", 7);
+    scanner.generate("wl_seat", 5);
 
-    const exe = b.addExecutable("vkwayland", "src/main.zig");
+    const exe = b.addExecutable("fliz", "src/main.zig");
 
     exe.setTarget(target);
     exe.setBuildMode(mode);
 
     exe.addIncludeDir("deps/wayland/");
-    
+
     const gen = vkgen.VkGenerateStep.init(b, "deps/vk.xml", "vk.zig");
     const vulkan_pkg = gen.package;
 
@@ -40,7 +38,6 @@ pub fn build(b: *Builder) void {
     exe.step.dependOn(&scanner.step);
 
     exe.linkLibC();
-    exe.linkSystemLibrary("vulkan");
     exe.linkSystemLibrary("wayland-client");
 
     // NOTE: Taken from https://github.com/ifreund/hello-zig-wayland/blob/master/build.zig
@@ -55,6 +52,6 @@ pub fn build(b: *Builder) void {
     if (b.args) |args| run_cmd.addArgs(args);
     run_cmd.step.dependOn(b.getInstallStep());
 
-    const run_step = b.step("run", "Run vkwayland");
+    const run_step = b.step("run", "Run fliz");
     run_step.dependOn(&run_cmd.step);
 }

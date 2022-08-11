@@ -186,31 +186,37 @@ fn readBigEndian(comptime T: type, index: usize) T {
 }
 
 fn getGlyfOffset(info: FontInfo, glyph_index: i32) !usize {
-    var g1: usize = 0;
-    var g2: usize = 0;
-
     assert(info.cff.size == 0);
 
     if (glyph_index >= info.glyph_count) return error.InvalidGlyphIndex;
 
-    if (info.index_to_loc_format >= 2) return error.InvalidIndexToLocationFormat;
+    if (info.index_to_loc_format != 0 and info.index_to_loc_format != 1) return error.InvalidIndexToLocationFormat;
+    const loca_start = @ptrToInt(info.data.ptr) + info.loca.offset;
+    const glyf_offset = @intCast(usize, info.glyf.offset);
 
-    const base_index = @ptrToInt(info.data.ptr) + info.loca.offset;
+    var glyph_data_offset: usize = 0;
+    var next_glyph_data_offset: usize = 0;
 
+    // Use 16 or 32 bit offsets based on index_to_loc_format
+    // https://docs.microsoft.com/en-us/typography/opentype/spec/head
     if (info.index_to_loc_format == 0) {
-        assert(false);
-        g1 = @intCast(usize, info.glyf.offset) + readBigEndian(u16, base_index + (@intCast(usize, glyph_index) * 2) + 0) * 2;
-        g2 = @intCast(usize, info.glyf.offset) + readBigEndian(u16, base_index + (@intCast(usize, glyph_index) * 2) + 2) * 2;
+        // Location values are stored as half the actual value.
+        // https://docs.microsoft.com/en-us/typography/opentype/spec/loca#short-version
+        const loca_table_offset: usize = loca_start + (@intCast(usize, glyph_index) * 2);
+        glyph_data_offset = glyf_offset + @intCast(u32, readBigEndian(u16, loca_table_offset + 0)) * 2;
+        next_glyph_data_offset = glyf_offset + @intCast(u32, readBigEndian(u16, loca_table_offset + 2)) * 2;
     } else {
-        g1 = @intCast(usize, info.glyf.offset) + readBigEndian(u32, base_index + (@intCast(usize, glyph_index) * 4) + 0);
-        g2 = @intCast(usize, info.glyf.offset) + readBigEndian(u32, base_index + (@intCast(usize, glyph_index) * 4) + 4);
+        glyph_data_offset = glyf_offset + readBigEndian(u32, loca_start + (@intCast(usize, glyph_index) * 4) + 0);
+        next_glyph_data_offset = glyf_offset + readBigEndian(u32, loca_start + (@intCast(usize, glyph_index) * 4) + 4);
     }
 
-    if (g1 == g2) {
-        return error.GlyphIndicesMatch;
+    if (glyph_data_offset == next_glyph_data_offset) {
+        // https://docs.microsoft.com/en-us/typography/opentype/spec/loca
+        // If loca[n] == loca[n + 1], that means the glyph has no outline (E.g space character)
+        return error.GlyphHasNoOutline;
     }
 
-    return g1;
+    return glyph_data_offset;
 }
 
 //
@@ -550,6 +556,8 @@ pub fn getRequiredDimensions(info: FontInfo, codepoint: i32, scale: Scale2D(f32)
     const glyph_index = @intCast(i32, findGlyphIndex(info, codepoint));
     const shift = Shift2D(f32){ .x = 0.0, .y = 0.0 };
     const bounding_box = try getGlyphBitmapBoxSubpixel(info, glyph_index, scale, shift);
+    std.debug.assert(bounding_box.x1 >= bounding_box.x0);
+    std.debug.assert(bounding_box.y1 >= bounding_box.y0);
     return Dimensions2D(u32){
         .width = @intCast(u32, bounding_box.x1 - bounding_box.x0),
         .height = @intCast(u32, bounding_box.y1 - bounding_box.y0),
@@ -583,6 +591,7 @@ pub fn getCodepointBoundingBoxScaled(info: FontInfo, codepoint: i32, scale: Scal
     return try getGlyphBoundingBoxScaled(info, glyph_index, scale);
 }
 
+// TODO:
 fn getGlyphBoundingBox(info: FontInfo, glyph_index: i32) !BoundingBox {
     const bounding_box_opt: ?BoundingBox = getGlyphBox(info, glyph_index);
     if (bounding_box_opt) |bounding_box| {
@@ -635,7 +644,7 @@ fn getGlyphBox(info: FontInfo, glyph_index: i32) ?BoundingBox {
         .x0 = bigToNative(i16, @intToPtr(*i16, base_index + 2).*), // min_x
         .y0 = bigToNative(i16, @intToPtr(*i16, base_index + 4).*), // min_y
         .x1 = bigToNative(i16, @intToPtr(*i16, base_index + 6).*), // max_x
-        .y1 = bigToNative(i16, @intToPtr(*i16, base_index + 8).*), // min_y
+        .y1 = bigToNative(i16, @intToPtr(*i16, base_index + 8).*), // max_y
     };
 }
 
@@ -2590,7 +2599,7 @@ pub fn initializeFont(allocator: Allocator, data: []u8) !FontInfo {
 
     std.log.info("Glyphs found: {d}", .{font_info.glyph_count});
 
-    font_info.index_to_loc_format = bigToNative(u16, @intToPtr(*u16, @ptrToInt(data.ptr) + font_info.head.offset + 50).*);
+    std.debug.assert(font_info.index_to_loc_format == 0 or font_info.index_to_loc_format == 1);
 
     if (cmap == 0) {
         return error.RequiredFontTableCmapMissing;
@@ -2607,6 +2616,8 @@ pub fn initializeFont(allocator: Allocator, data: []u8) !FontInfo {
     if (font_info.hmtx.offset == 0) {
         return error.RequiredFontTableHmtxMissing;
     }
+
+    font_info.index_to_loc_format = bigToNative(u16, @intToPtr(*u16, @ptrToInt(data.ptr) + font_info.head.offset + 50).*);
 
     const head = @intToPtr(*Head, @ptrToInt(data.ptr) + font_info.head.offset).*;
     assert(toNative(u32, head.magic_number, .Big) == 0x5F0F3CF5);
