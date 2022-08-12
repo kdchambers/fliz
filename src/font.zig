@@ -730,22 +730,6 @@ fn printPoints(points: []Point(f64)) void {
     print("Done\n", .{});
 }
 
-fn pointValue(a: Point(i64), b: Point(i64), p: Point(i64)) i64 {
-    return ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x));
-}
-
-fn isAbove(a: Point(i64), b: Point(i64), p: Point(i64)) bool {
-    return ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)) >= 0;
-}
-
-inline fn max(comptime Type: type, a: Type, b: Type) Type {
-    return if (a > b) a else b;
-}
-
-inline fn min(comptime Type: type, a: Type, b: Type) Type {
-    return if (a > b) b else a;
-}
-
 inline fn horizontalPlaneIntersection(vertical_axis: f64, a: Point(f64), b: Point(f64)) f64 {
     const m = (a.y - b.y) / (a.x - b.x);
     const s = -1.0 * ((m * a.x) - a.y);
@@ -1721,8 +1705,8 @@ fn rasterize2(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []V
                 }
 
                 const is_outsize_y_range = blk: {
-                    const max_yy = max(f64, point_a.y, point_b.y);
-                    const min_yy = min(f64, point_a.y, point_b.y);
+                    const max_yy = @maximum(point_a.y, point_b.y);
+                    const min_yy = @minimum(point_a.y, point_b.y);
                     std.debug.assert(max_yy >= min_yy);
                     if (scanline_y > max_yy or scanline_y < min_yy) {
                         break :blk true;
@@ -1970,8 +1954,8 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
             }
 
             const is_outsize_y_range = blk: {
-                const max_yy = max(f64, point_a.y, point_b.y);
-                const min_yy = min(f64, point_a.y, point_b.y);
+                const max_yy = @maximum(point_a.y, point_b.y);
+                const min_yy = @minimum(point_a.y, point_b.y);
                 std.debug.assert(max_yy >= min_yy);
                 if (scanline_y > max_yy or scanline_y < min_yy) {
                     break :blk true;
