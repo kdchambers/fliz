@@ -736,7 +736,7 @@ fn setup(allocator: std.mem.Allocator, app: *GraphicsContext) !void {
     std.log.info("Font atlas generated in {}", .{std.fmt.fmtDuration(generate_glyph_atlas_duration)});
 
     // TODO: This is linux specific
-    if (clib.dlopen("libvulkan.so", clib.RTLD_NOW)) |vulkan_loader| {
+    if (clib.dlopen("libvulkan.so.1", clib.RTLD_NOW)) |vulkan_loader| {
         const vk_get_instance_proc_addr_fn_opt = @ptrCast(?fn (instance: vk.Instance, procname: [*:0]const u8) vk.PfnVoidFunction, clib.dlsym(vulkan_loader, "vkGetInstanceProcAddr"));
         if (vk_get_instance_proc_addr_fn_opt) |vk_get_instance_proc_addr_fn| {
             vkGetInstanceProcAddr = vk_get_instance_proc_addr_fn;
