@@ -137,12 +137,14 @@ pub fn Dimensions2D(comptime T: type) type {
     };
 }
 
-const BoundingBox = packed struct {
-    x0: i32,
-    y0: i32,
-    x1: i32,
-    y1: i32,
-};
+fn BoundingBox(comptime T: type) type {
+    return struct {
+        x0: T,
+        y0: T,
+        x1: T,
+        y1: T,
+    };
+}
 
 // TODO: Wrap in a function that lets you select pixel type
 const Bitmap = struct {
@@ -571,12 +573,12 @@ pub fn getVerticalOffset(info: FontInfo, codepoint: i32, scale: Scale2D(f32)) !i
     return @intCast(i16, bounding_box.y1);
 }
 
-pub fn getCodepointBitmapBox(info: FontInfo, codepoint: i32, scale: Scale2D(f32)) !BoundingBox {
+pub fn getCodepointBitmapBox(info: FontInfo, codepoint: i32, scale: Scale2D(f32)) !BoundingBox(i32) {
     const shift = Shift2D(f32){ .x = 0, .y = 0 };
     return try getCodepointBitmapBoxSubpixel(info, codepoint, scale, shift);
 }
 
-fn getCodepointBitmapBoxSubpixel(info: FontInfo, codepoint: i32, scale: Scale2D(f32), shift: Shift2D(f32)) !BoundingBox {
+fn getCodepointBitmapBoxSubpixel(info: FontInfo, codepoint: i32, scale: Scale2D(f32), shift: Shift2D(f32)) !BoundingBox(i32) {
     const glyph_index = @intCast(i32, findGlyphIndex(info, codepoint));
     return try getGlyphBitmapBoxSubpixel(info, glyph_index, scale, shift);
 }
@@ -586,22 +588,22 @@ fn getCodepointBitmapSubpixel(allocator: Allocator, info: FontInfo, scale: Scale
     return try getGlyphBitmapSubpixel(allocator, info, scale, shift, glyph_index, offset);
 }
 
-pub fn getCodepointBoundingBoxScaled(info: FontInfo, codepoint: i32, scale: Scale2D(f32)) !BoundingBox {
+pub fn getCodepointBoundingBoxScaled(info: FontInfo, codepoint: i32, scale: Scale2D(f32)) !BoundingBox(i32) {
     const glyph_index = @intCast(i32, findGlyphIndex(info, codepoint));
     return try getGlyphBoundingBoxScaled(info, glyph_index, scale);
 }
 
 // TODO:
-fn getGlyphBoundingBox(info: FontInfo, glyph_index: i32) !BoundingBox {
-    const bounding_box_opt: ?BoundingBox = getGlyphBox(info, glyph_index);
+fn getGlyphBoundingBox(info: FontInfo, glyph_index: i32) !BoundingBox(i32) {
+    const bounding_box_opt: ?BoundingBox(i32) = getGlyphBox(info, glyph_index);
     if (bounding_box_opt) |bounding_box| {
         return bounding_box;
     }
     return error.GetBitmapBoxFailed;
 }
 
-fn getGlyphBoundingBoxScaled(info: FontInfo, glyph_index: i32, scale: Scale2D(f32)) !BoundingBox {
-    const bounding_box_opt: ?BoundingBox = getGlyphBox(info, glyph_index);
+fn getGlyphBoundingBoxScaled(info: FontInfo, glyph_index: i32, scale: Scale2D(f32)) !BoundingBox(i32) {
+    const bounding_box_opt: ?BoundingBox(i32) = getGlyphBox(info, glyph_index);
     if (bounding_box_opt) |bounding_box| {
         return BoundingBox{
             .x0 = @floatToInt(i32, @floor(@intToFloat(f64, bounding_box.x0) * scale.x)),
@@ -613,8 +615,8 @@ fn getGlyphBoundingBoxScaled(info: FontInfo, glyph_index: i32, scale: Scale2D(f3
     return error.GetBitmapBoxFailed;
 }
 
-fn getGlyphBitmapBoxSubpixel(info: FontInfo, glyph_index: i32, scale: Scale2D(f32), shift: Shift2D(f32)) !BoundingBox {
-    const bounding_box_opt: ?BoundingBox = getGlyphBox(info, glyph_index);
+fn getGlyphBitmapBoxSubpixel(info: FontInfo, glyph_index: i32, scale: Scale2D(f32), shift: Shift2D(f32)) !BoundingBox(i32) {
+    const bounding_box_opt: ?BoundingBox(i32) = getGlyphBox(info, glyph_index);
     if (bounding_box_opt) |bounding_box| {
         return BoundingBox{
             .x0 = @floatToInt(i32, @floor(@intToFloat(f32, bounding_box.x0) * scale.x + shift.x)),
@@ -626,7 +628,7 @@ fn getGlyphBitmapBoxSubpixel(info: FontInfo, glyph_index: i32, scale: Scale2D(f3
     return error.GetBitmapBoxFailed;
 }
 
-fn getGlyphBox(info: FontInfo, glyph_index: i32) ?BoundingBox {
+fn getGlyphBox(info: FontInfo, glyph_index: i32) ?BoundingBox(i32) {
     assert(info.cff.size == 0);
 
     const g: usize = getGlyfOffset(info, glyph_index) catch |err| {
@@ -640,7 +642,7 @@ fn getGlyphBox(info: FontInfo, glyph_index: i32) ?BoundingBox {
     }
 
     const base_index: usize = @ptrToInt(info.data.ptr) + g;
-    return BoundingBox{
+    return BoundingBox(i32){
         .x0 = bigToNative(i16, @intToPtr(*i16, base_index + 2).*), // min_x
         .y0 = bigToNative(i16, @intToPtr(*i16, base_index + 4).*), // min_y
         .x1 = bigToNative(i16, @intToPtr(*i16, base_index + 6).*), // max_x
@@ -1359,7 +1361,7 @@ fn pixelLineIntersection(x_per_y: f64, point: Point(f64)) Point(f64) {
     std.debug.print("Result: {d} {d}\n", .{ point.x + (best_scale), point.y + (best_scale * y_per_x) });
 
     return Point(f64){
-        .x = point.x + (best_scale * x_per_unit), // need a best scale of 1
+        .x = point.x + (best_scale * x_per_unit),
         .y = point.y + (best_scale * y_per_unit),
     };
 }
@@ -1481,6 +1483,10 @@ fn sortAscending(T: type, slice: []T) []T {
     return slice;
 }
 
+inline fn pixelIndex(pixel_value: f64) usize {
+    return @floatToInt(usize, @floor(pixel_value));
+}
+
 // How would you write function, that takes a set of points within y 0 - 1 and rasterizes the line
 
 // You could make points always form a shape.
@@ -1517,8 +1523,35 @@ fn rasterizeLineSegment(line: []graphics.RGBA(f32), points: []Point(f64)) void {
     //
     // Find auxilary y intersection points
     //
+
+    // A fill region can only have 2 entry y intersections
+    // Wrong, you have a line go along y axis
+
+    // X pixel index (inclusive) to start block fill region
+    // const start_fill_index = blk: {
+    //     var point_index: usize = 1;
+    //     var leftmost_top_opt: ?usize = null;
+    //     while (point_index < points.len - 1) : (point_index += 1) {
+    //         const point = points[point_index];
+    //         if(point.y == 1.0) {
+    //             if(leftmost_top_opt) |leftmost_top| {
+    //                 const leftmost_top_point = points[leftmost_top];
+    //                 if(point.x < leftmost_top_point.x) {
+    //                     leftmost_top_opt = point;
+    //                 }
+    //             } else {
+    //                 leftmost_top_opt = point;
+    //             }
+    //         }
+    //     }
+    //     if(leftmost_top_opt) |leftmost_top| {
+    //         const leftmost_top_point = points[leftmost_top];
+    //     }
+    //     // return
+    // };
+
     var point_index: usize = 1;
-    while (point_index < points.len) : (point_index += 1) {
+    while (point_index < points.len - 1) : (point_index += 1) {
         const point = points[point_index];
         if (point.y == 0.0 or point.y == 1.0) {
             std.debug.assert(aux_intersects[0] == null or aux_intersects[1] == null);
@@ -1529,6 +1562,13 @@ fn rasterizeLineSegment(line: []graphics.RGBA(f32), points: []Point(f64)) void {
             }
         }
     }
+
+    // The block fill region is determined by:
+    // It starts at the first of either the top or bottom intersection
+    // (Whichever is most rightmost)
+    // It ends at the last of either the top or the bottom intersection
+    // (Whichever is most leftmost)
+    // If start is to the right of end, there is no block fill region
 
     //
     // The presence of two auxilary y intersection points means that we
@@ -1611,6 +1651,10 @@ fn clampTo(value: f64, edge: f64, threshold: f64) f64 {
     }
     return value;
 }
+
+// Ideas
+// 1. Wrap contour so that you can use a t that goes above 1.0 and wraps
+// 2. Pixels that don't have any points are filled
 
 fn rasterize2(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
     const bitmap_pixel_count = @intCast(usize, dimensions.width) * dimensions.height;
@@ -1871,6 +1915,180 @@ fn rasterize2(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []V
     return bitmap;
 }
 
+// This is cool for curves, but how can I make this better for lines
+// I want to be able to sample a point on y or x axis, and then
+// some additionals in the middle if a curve
+
+const Contour = struct {
+    from: Point(f64),
+    to: Point(f64),
+    control_opt: ?Point(f64),
+
+    pub fn sample(self: @This(), t: f64) Point(f64) {
+        std.debug.assert(t <= 1.0);
+        std.debug.assert(t >= 0.0);
+        if (self.control_opt) |control| {
+            const bezier = BezierQuadratic{
+                .a = self.from,
+                .b = self.to,
+                .control = control,
+            };
+            return quadraticBezierPoint(bezier, t);
+        }
+        return .{
+            .x = self.from.x + (self.to.x - self.from.x) * t,
+            .y = self.from.y + (self.to.y - self.from.y) * t,
+        };
+    }
+
+    pub fn sampleAtDistance(self: @This(), ideal: f64, threshold: f64, base_point: SampledPoint) ?SampledPoint {
+        if (self.control_opt) |_| {
+            const distance_max: f64 = (ideal - threshold);
+            const distance_min: f64 = (ideal - threshold);
+            var t_increment: f64 = base_point.t_increment;
+            var i: usize = 0;
+            while (i < 20) : (i += 1) {
+                const sampled_point = outline.samplePoint(base_point.t + t_increment);
+                const distance = distanceBetweenPoints(sampled_point, base_point.p);
+                if ((distance > distance_max) or (distance < distance_min)) {
+                    t_increment = clamp(t_increment / (distance / ideal), 0.0, 1.0);
+                    continue;
+                }
+                return SampledPoint{
+                    .p = sampled_point,
+                    .t = t + t_increment,
+                    .t_increment = t_increment,
+                };
+            }
+            return null;
+        }
+        const line_length = distanceBetweenPoints(self.to, self.from);
+        const t_increment: f64 = ideal / line_length;
+        const new_t: f64 = base_point.t + t_increment;
+        if (new_t > 1.0) return null;
+        return SampledPoint{
+            .p = self.sample(new_t),
+            .t = new_t,
+            .t_increment = t_increment,
+        };
+    }
+
+    // pub fn boundingBox() BoundingBox(f64) {
+    //     // TODO: Implement
+    //     std.debug.assert(false);
+    //     return .{
+    //         .x0 = 0.0,
+    //         .x1 = 0.0,
+    //         .y0 = 0.0,
+    //         .y1 = 0.0,
+    //     };
+    // }
+};
+
+// TODO: Double check formula and write some tests
+fn distanceBetweenPoints(point_a: Point(f64), point_b: Point(f64)) f64 {
+    const pow = std.math.pow;
+    const sqrt = sted.math.sqrt;
+    return sqrt(pow(point_b.y - point_a.y, 2) + pow(point_a.x - point_b.x, 2));
+}
+
+const YIntersection = struct {
+    t: f64,
+    x: f64,
+    outline_index: u32,
+};
+
+// You could always take y intersections, and intersections for previous line
+
+const Outline = struct {
+    contours: []Contour,
+
+    pub fn samplePoint(self: @This(), t: f64) Point(f64) {
+        const t_floored: f64 = @floor(t);
+        const contour_index = @floatToInt(usize, t_floored);
+        std.debug.assert(contour_index < self.contours.len);
+        return self.contours[contour_index].sample(t - t_floored);
+    }
+
+    // When a fill region is ended, the direction around the contour will be negative
+    pub fn sampleAtDistance(self: @This(), ideal: f64, threshold: f64, base_point: SampledPoint) SampledPoint {
+        const t_floored: f64 = @floor(t);
+        const contour_index = @floatToInt(usize, t_floored);
+        var new_base = SampledPoint{
+            .p = base_point.p,
+            .t = t - t_floored,
+            .t_increment = base_point.t_increment,
+        };
+        if (self.contours[contour_index].sampleAtDistance(ideal, threshold, new_base)) |sample| {
+            return sample;
+        }
+        const next_contour_index = (contour_index + 1) % self.contours.len;
+        new_base.t = 0.0;
+        // TODO: Is is possible though that distance will be large enough to skip a contour,
+        //       or even loop around entirely
+        if (self.contours[next_contour_index].sampleAtDistance(ideal, threshold, new_base)) |sample| {
+            return sample;
+        }
+        // This function cannot fail (Barring a bug in the code), as an outline is a closed loop
+        unreachable;
+    }
+
+    pub fn horizontalIntersections(self: @This(), buffer: []f64, x_axis: f64) []YIntersection {
+        var count: usize = 0;
+        for (self.contours) |contour| {
+            if (contour.control_opt) |control| {}
+        }
+    }
+};
+
+const YIntersectionPair = struct {
+    start: YIntersection,
+    end: YIntersection,
+};
+
+const Shape = struct {
+    outlines: []Outline,
+
+    pub fn horizontalIntersections(self: @This(), buffer: []YIntersection, x_axis: f64) []YIntersection {
+        var count: usize = 0;
+        for (self.outlines) |outline, outline_i| {
+            const c = outline.horizontalIntersections(buffer[count..], x_axis).len;
+            for (buffer[count .. count + c]) |*intersection| {
+                intersection.*.outline_index = outline_i;
+            }
+            count += c;
+            std.debug.assert(count < buffer.len);
+        }
+        // Sort by x ascending
+        return buffer[0..count];
+    }
+};
+
+const SampledPoint = struct {
+    p: Point(f64),
+    t: f64,
+    t_increment: f64,
+};
+
+fn fillPixel(outline: Outline, t: f64, entry: Point(f64)) f64 {}
+
+fn rasterize3() void {
+    for (scanlines) |scanline_y| {
+        const intersection_pairs = getIntersections(scanline_y);
+        for (intersection_pairs) |pair| {
+            const is_fill_region = true;
+            if (is_fill_region) {
+                const fill_start = doLeft();
+                const fill_end = doRight();
+                var i: usize = fill_start;
+                while (i < fill_end) : (i += 1) {
+                    pixel[i] = setPixel(1.0);
+                }
+            }
+        }
+    }
+}
+
 fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
     std.log.info("Glyph bbox {d} x {d} -- {d} x {d}", .{
         min_x,
@@ -1891,6 +2109,16 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
         .a = 0.0,
     };
     std.mem.set(graphics.RGBA(f32), bitmap.pixels, null_pixel);
+
+    var outline_count: usize = 0;
+    for (vertices) |vertex| {
+        if (@intToEnum(VMove, vertex.kind) == .move) {
+            outline_count += 1;
+        }
+    }
+    std.debug.info("Outlines: {d}", .{outline_count});
+
+    var outlines = try allocator.alloc(Outline, outline_count);
 
     std.log.info("Rasterizing image of dimensions: {d} x {d}", .{ bitmap.width, bitmap.height });
     const printf = std.debug.print;
@@ -2112,8 +2340,6 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
 
                 if (scanline_start.isCurve()) {
 
-                    // I could get the intersection at next y
-
                     //
                     // Do leading AA with only an intersection point and a connecting curve
                     // This is a non-optimized catch-all case for rasterizing a curve contour
@@ -2240,7 +2466,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                                 sampled_point_rel.x,
                                 sampled_point_rel.y,
                             });
-                            // Not need to interpolate a new point
+                            // No need to interpolate a new point
                             if (last_point_rel.y == 0.0) {
                                 const coverage = pixelCurveCoverage(point_buffer[0..point_count]);
                                 bitmap.pixels[current_x_pixel + (image_y_index * dimensions.width)] = pixelCurve(coverage);
@@ -2592,7 +2818,6 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                     // Non-vertical line
                     //
                     const is_positive: bool = line_start.left.y < line_start.right.y;
-                    // std.log.info("Leading AA iteration. is_positive {}", .{is_positive});
                     const end_x: i64 = if (is_positive) @floatToInt(u32, @floor(scanline_end.x_position)) else -1;
                     const increment: i32 = if (is_positive) 1 else -1;
                     const left = line_start.left;
@@ -2600,13 +2825,9 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                     var current_x = @intCast(i64, start_x);
                     while (current_x != end_x) : (current_x += increment) {
                         std.debug.assert(current_x >= 0);
-                        // std.log.info("Pixel coverage iteration. ENTRY {d:.2} {d:.2}", .{
-                        //     entry_intersection.x, entry_intersection.y,
-                        // });
                         const exit_intersection = blk: {
                             const slope = @fabs((left.y - right.y) / (left.x - right.x));
                             const exit_height = if (is_positive) ((1.0 - entry_intersection.x) * slope) else (entry_intersection.x * slope);
-                            // std.log.info("Exit height: {d}", .{exit_height});
                             // NOTE: Working around a stage 1 compiler bug
                             //       A break inside the initial if statement triggers a broken
                             //       LLVM module error
@@ -2616,7 +2837,6 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                             if (exit_height > remaining_y) {
                                 const y_per_x = remaining_y / slope;
                                 const result = if (is_positive) entry_intersection.x + y_per_x else entry_intersection.x - y_per_x;
-                                // std.log.info("Calculated exit x: {d}", .{result});
                                 std.debug.assert(result <= 1.0);
                                 std.debug.assert(result >= 0.0);
                                 x = result;
@@ -2627,7 +2847,6 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                             }
                             if (x != entry_intersection.x) {
                                 const new_slope = @fabs((y - entry_intersection.y) / (x - entry_intersection.x));
-                                // std.log.info("Old slope {d} New {d}", .{ slope, new_slope });
                                 std.debug.assert(@fabs(slope - new_slope) < 0.0001);
                             }
                             break :blk Point(f64){
@@ -2637,16 +2856,11 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                         };
                         const coverage = calculateCoverage(entry_intersection, exit_intersection, is_positive);
                         const x_pos = @intCast(usize, current_x);
-                        bitmap.pixels[x_pos + (image_y_index * dimensions.width)] = pixelFill(coverage); //@floatToInt(u8, 255.0 * coverage);
-
-                        // std.log.info("Current: {d} end {d}", .{ current_x, end_x });
-
+                        bitmap.pixels[x_pos + (image_y_index * dimensions.width)] = pixelFill(coverage);
                         if (((current_x + increment) == end_x) or exit_intersection.y == 1.0) {
-                            // std.log.info("full_fill_index_start set", .{});
                             full_fill_index_start = if (is_positive) (@intCast(u32, current_x) + 1) else (start_x + 1);
                             break;
                         }
-
                         entry_intersection = .{
                             .x = if (is_positive) 0.0 else 1.0,
                             .y = exit_intersection.y,
