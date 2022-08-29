@@ -139,8 +139,8 @@ const asset_path_font = "./assets/RobotoMono.ttf";
 
 var glyphs: GlyphSet = undefined;
 
-const fragment_shader_path = "../shaders/generic.frag.spv";
-const vertex_shader_path = "../shaders/generic.vert.spv";
+const fragment_shader_path = "shaders/generic.frag.spv";
+const vertex_shader_path = "shaders/generic.vert.spv";
 
 // NOTE: The following points aren't used in the code, but are useful to know
 // http://anki3d.org/vulkan-coordinate-system/
@@ -314,7 +314,7 @@ var frame_duration_awake_ns: u64 = 0;
 //   3. Core Types + Functions
 //
 
-var vkGetInstanceProcAddr: fn (instance: vk.Instance, procname: [*:0]const u8) vk.PfnVoidFunction = undefined;
+var vkGetInstanceProcAddr: *const fn (instance: vk.Instance, procname: [*:0]const u8) vk.PfnVoidFunction = undefined;
 
 const ScreenPixelBaseType = u16;
 const ScreenNormalizedBaseType = f32;
@@ -737,7 +737,7 @@ fn setup(allocator: std.mem.Allocator, app: *GraphicsContext) !void {
 
     // TODO: This is linux specific
     if (clib.dlopen("libvulkan.so.1", clib.RTLD_NOW)) |vulkan_loader| {
-        const vk_get_instance_proc_addr_fn_opt = @ptrCast(?fn (instance: vk.Instance, procname: [*:0]const u8) vk.PfnVoidFunction, clib.dlsym(vulkan_loader, "vkGetInstanceProcAddr"));
+        const vk_get_instance_proc_addr_fn_opt = @ptrCast(?*const fn (instance: vk.Instance, procname: [*:0]const u8) vk.PfnVoidFunction, clib.dlsym(vulkan_loader, "vkGetInstanceProcAddr"));
         if (vk_get_instance_proc_addr_fn_opt) |vk_get_instance_proc_addr_fn| {
             vkGetInstanceProcAddr = vk_get_instance_proc_addr_fn;
             app.base_dispatch = try vulkan_config.BaseDispatch.load(vkGetInstanceProcAddr);

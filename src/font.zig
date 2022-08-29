@@ -5,7 +5,6 @@
 
 const std = @import("std");
 const log = std.log;
-const fs = std.fs;
 const Allocator = std.mem.Allocator;
 const toNative = std.mem.toNative;
 const bigToNative = std.mem.bigToNative;
@@ -24,12 +23,62 @@ pub fn getCodepointBitmap(allocator: Allocator, info: FontInfo, scale: Scale2D(f
     return try getCodepointBitmapSubpixel(allocator, info, scale, shift, codepoint, offset);
 }
 
+// HHEA Table | https://docs.microsoft.com/en-us/typography/opentype/spec/hhea
+//
+// uint16 	majorVersion 	Major version number of the horizontal header table — set to 1.
+// uint16 	minorVersion 	Minor version number of the horizontal header table — set to 0.
+// FWORD 	ascender 	    Typographic ascent—see note below.
+// FWORD 	descender 	    Typographic descent—see note below.
+// FWORD 	lineGap 	    Typographic line gap.
+// (Negative LineGap values are treated as zero in some legacy platform implementations.)
+// UFWORD 	advanceWidthMax 	Maximum advance width value in 'hmtx' table.
+// FWORD 	minLeftSideBearing 	Minimum left sidebearing value in 'hmtx' table for glyphs with contours (empty glyphs should be ignored).
+// FWORD 	minRightSideBearing Minimum right sidebearing value; calculated as min(aw - (lsb + xMax - xMin)) for glyphs with contours (empty glyphs should be ignored).
+// FWORD 	xMaxExtent 	        Max(lsb + (xMax - xMin)).
+// int16 	caretSlopeRise 	    Used to calculate the slope of the cursor (rise/run); 1 for vertical.
+// int16 	caretSlopeRun 	    0 for vertical.
+// int16 	caretOffset 	    The amount by which a slanted highlight on a glyph needs to be shifted to produce the best appearance. Set to 0 for non-slanted fonts
+// int16 	(reserved) 	        set to 0
+// int16 	(reserved) 	        set to 0
+// int16 	(reserved) 	        set to 0
+// int16 	(reserved) 	        set to 0
+// int16 	metricDataFormat 	0 for current format.
+// uint16 	numberOfHMetrics 	Number of hMetric entries in 'hmtx' table
+
+const FWORD = i16;
+const UFWORD = u16;
+
+const TableHHEA = struct {
+    const index = struct {
+        const major_version = 0;
+        const minor_version = 2;
+        const ascender = 4;
+        const descender = 6;
+        const line_gap = 8;
+        const advance_width_max = 10;
+        const min_leftside_bearing = 12;
+        const min_rightside_bearing = 14;
+        const x_max_extent = 16;
+        const caret_slope_rise = 18;
+        const caret_slope_run = 20;
+        const caret_offset = 22;
+        const reserved_1 = 24;
+        const reserved_2 = 26;
+        const reserved_3 = 28;
+        const reserved_4 = 30;
+        const metric_data_format = 32;
+        const number_of_hmetics = 34;
+    };
+};
+
 pub fn getAscent(info: FontInfo) i16 {
-    return bigToNative(i16, @intToPtr(*i16, @ptrToInt(info.data.ptr) + info.hhea.offset + 4).*);
+    const offset = info.hhea.offset + TableHHEA.index.ascender;
+    return bigToNative(i16, @intToPtr(*i16, @ptrToInt(info.data.ptr) + offset).*);
 }
 
 pub fn getDescent(info: FontInfo) i16 {
-    return bigToNative(i16, @intToPtr(*i16, @ptrToInt(info.data.ptr) + info.hhea.offset + 6).*);
+    const offset = info.hhea.offset + TableHHEA.index.descender;
+    return bigToNative(i16, @intToPtr(*i16, @ptrToInt(info.data.ptr) + offset).*);
 }
 
 const TableLookup = struct {
@@ -1708,7 +1757,6 @@ fn rasterize2(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []V
 
                 std.debug.assert(!(point_a.x == point_b.x and point_a.y == point_b.y));
 
-                // TODO: Only valid if it's a line
                 const is_horizontal = current_vertex.y == previous_vertex.y;
                 if (kind == .line and is_horizontal) {
                     if (point_a.y >= abs_scanline and point_a.y < (abs_scanline + sub_scanline_increment)) {
@@ -1912,6 +1960,7 @@ const Contour = struct {
     from: Point(f64),
     to: Point(f64),
     control_opt: ?Point(f64),
+    bounding_box: BoundingBox(f64),
 
     pub fn sample(self: @This(), t: f64) Point(f64) {
         std.debug.assert(t <= 1.0);
@@ -1973,10 +2022,13 @@ fn distanceBetweenPoints(point_a: Point(f64), point_b: Point(f64)) f64 {
 const YIntersection = struct {
     t: f64,
     x: f64,
+    previous_x: f64 = -1.0,
+    previous_t: f64 = -1.0,
     outline_index: u32,
-};
 
-// You could always take y intersections, and intersections for previous line
+    // You can get the distance between both points and calculate a
+    // reasonable t_increment
+};
 
 const Outline = struct {
     contours: []Contour,
@@ -2011,11 +2063,8 @@ const Outline = struct {
         unreachable;
     }
 
-    // pub fn horizontalIntersections(self: @This(), buffer: []f64, x_axis: f64) []YIntersection {
-    //     var count: usize = 0;
-    //     for (self.contours) |contour| {
-    //         if (contour.control_opt) |control| {}
-    //     }
+    // pub fn horizontalIntersections(self: @This(), buffer: []YIntersection, x_axis: f64) []YIntersection {
+    //     //
     // }
 };
 
@@ -2066,6 +2115,11 @@ const SampledPoint = struct {
 //         }
 //     }
 // }
+
+// How to determine whether there's a fill regions
+// If it's the first intersection, then there won't be a fr
+// If you have previous intersections, you can use them to fill in middle (Have to check for concave curves though)
+//
 
 fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
     std.log.info("Glyph bbox {d} x {d} -- {d} x {d}", .{
@@ -2858,12 +2912,12 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                 if (scanline_end.isCurve()) {
                     // std.log.info("  Curve found", .{});
                     // const coverage = @floatToInt(u8, (@rem(scanline_end.x_position, 1.0)) * 255);
-                    bitmap.pixels[start_x + (image_y_index * dimensions.width)] = pixelFill(@rem(scanline_end.x_position, 1.0)); //coverage;
+                    bitmap.pixels[start_x + (image_y_index * dimensions.width)] = pixelFill(@rem(scanline_end.x_position, 1.0));
                     full_fill_index_end = if (start_x == 0) 0 else start_x - 1;
                 } else if (line_end.isVertical()) {
                     // std.log.info("  Vertical found", .{});
                     // const coverage = @floatToInt(u8, (@rem(scanline_end.x_position, 1.0)) * 255);
-                    bitmap.pixels[start_x + (image_y_index * dimensions.width)] = pixelFill(@rem(scanline_end.x_position, 1.0)); //coverage;
+                    bitmap.pixels[start_x + (image_y_index * dimensions.width)] = pixelFill(@rem(scanline_end.x_position, 1.0));
                     full_fill_index_end = if (start_x == 0) 0 else start_x - 1;
                 } else {
                     const direction = line_end.direction();
@@ -3108,13 +3162,13 @@ const CMAPSubtable = struct {
                 log.info("Platform specific ID for '{}' => '{}'", .{ table.platform_id, table.platform_specific_id.unicode });
             },
             .microsoft => {
-                // unreachable;
+                unreachable;
             },
             .macintosh => {
-                // unreachable;
+                unreachable;
             },
             .reserved => {
-                // unreachable;
+                unreachable;
             },
         }
 
