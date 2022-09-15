@@ -3125,9 +3125,9 @@ const CmapIndex = struct {
 
 const CMAPPlatformID = enum(u16) {
     unicode = 0,
-    macintosh,
-    reserved,
-    microsoft,
+    macintosh = 1,
+    reserved = 2,
+    microsoft = 3,
 };
 
 const CMAPPlatformSpecificID = packed union {
@@ -3418,7 +3418,18 @@ pub fn initializeFont(allocator: Allocator, font_data: []u8) !FontInfo {
 
         var i: usize = 0;
         while (i < subtable_count) : (i += 1) {
-            const platform_id = try reader.readEnum(PlatformID, .Big);
+            comptime {
+                std.debug.assert(@sizeOf(CMAPPlatformID) == 2);
+                std.debug.assert(@sizeOf(CMAPPlatformSpecificID) == 2);
+            }
+            const platform_id = try reader.readEnum(CMAPPlatformID, .Big);
+            const platform_specific_id = blk: {
+                switch (platform_id) {
+                    .unicode => break :blk CMAPPlatformSpecificID{ .unicode = try reader.readEnum(CMAPPlatformSpecificID.Unicode, .Big) },
+                    else => return error.InvalidSpecificPlatformID,
+                }
+            };
+            _ = platform_specific_id;
             const offset = try reader.readIntBig(u32);
             std.log.info("Platform: {}", .{platform_id});
             if (platform_id == .unicode) break :outer data_sections.cmap.offset + offset;
