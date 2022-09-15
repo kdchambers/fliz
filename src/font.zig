@@ -3350,6 +3350,8 @@ pub fn initializeFont(allocator: Allocator, font_data: []u8) !FontInfo {
     var font_info = FontInfo{
         .data = font_data,
         .hhea = data_sections.hhea,
+        .loca = data_sections.loca,
+        .glyf = data_sections.glyf,
     };
 
     {
@@ -3391,6 +3393,9 @@ pub fn initializeFont(allocator: Allocator, font_data: []u8) !FontInfo {
         head.y_min = try reader.readIntBig(i16);
         head.x_max = try reader.readIntBig(i16);
         head.y_max = try reader.readIntBig(i16);
+
+        std.debug.assert(head.x_min <= head.x_max);
+        std.debug.assert(head.y_min <= head.y_max);
 
         head.mac_style = try reader.readStruct(Head.MacStyle);
 
