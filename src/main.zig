@@ -1515,7 +1515,6 @@ fn pointerListener(_: *wl.Pointer, event: wl.Pointer.Event, client: *WaylandClie
             _ = frame;
         },
         .axis_source => |axis_source| {
-            _ = axis_source;
             std.log.info("Mouse: axis_source {}", .{axis_source.axis_source});
         },
         .axis_stop => |axis_stop| {

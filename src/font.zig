@@ -81,39 +81,28 @@ pub fn getDescent(info: FontInfo) i16 {
     return bigToNative(i16, @intToPtr(*i16, @ptrToInt(info.data.ptr) + offset).*);
 }
 
-const TableLookup = struct {
-    offset: u32 = 0,
-    length: u32 = 0,
-};
-
 pub const FontInfo = struct {
     // zig fmt: off
-    userdata: *void,
     data: []u8,
     glyph_count: i32 = 0,
-    loca: TableLookup,
-    head: TableLookup,
-    glyf: TableLookup,
-    hhea: TableLookup,
-    hmtx: TableLookup,
-    kern: TableLookup,
-    gpos: TableLookup,
-    svg: TableLookup,
-    maxp: TableLookup,
+    loca: SectionRange = .{},
+    head: SectionRange = .{},
+    glyf: SectionRange = .{},
+    hhea: SectionRange = .{},
+    hmtx: SectionRange = .{},
+    kern: SectionRange = .{},
+    gpos: SectionRange = .{},
+    svg: SectionRange = .{},
+    maxp: SectionRange = .{},
+    cff: Buffer = .{},
     index_map: i32 = 0, 
     index_to_loc_format: i32 = 0,
-    cff: Buffer,
-    char_strings: Buffer,
-    gsubrs: Buffer,
-    subrs: Buffer,
-    font_dicts: Buffer,
-    fd_select: Buffer,
     cmap_encoding_table_offset: u32 = 0,
 // zig fmt: on
 };
 
 const Buffer = struct {
-    data: []u8,
+    data: []u8 = undefined,
     cursor: u32 = 0,
     size: u32 = 0,
 };
@@ -343,7 +332,7 @@ pub fn scaleForPixelHeight(info: FontInfo, height: f32) f32 {
     return height / fheight;
 }
 
-const GlyhHeader = packed struct {
+const GlyhHeader = extern struct {
     // See: https://docs.microsoft.com/en-us/typography/opentype/spec/glyf
     //
     //  If the number of contours is greater than or equal to zero, this is a simple glyph.
@@ -700,7 +689,7 @@ fn getGlyphBox(info: FontInfo, glyph_index: i32) ?BoundingBox(i32) {
 }
 
 fn Offset2D(comptime T: type) type {
-    return packed struct {
+    return extern struct {
         x: T,
         y: T,
     };
@@ -768,7 +757,7 @@ fn getGlyphBitmapSubpixel(allocator: Allocator, info: FontInfo, desired_scale: S
 }
 
 fn Point(comptime T: type) type {
-    return packed struct {
+    return extern struct {
         x: T,
         y: T,
     };
@@ -787,7 +776,7 @@ inline fn horizontalPlaneIntersection(vertical_axis: f64, a: Point(f64), b: Poin
     return (vertical_axis - s) / m;
 }
 
-const BezierQuadratic = packed struct {
+const BezierQuadratic = extern struct {
     a: Point(f64),
     b: Point(f64),
     control: Point(f64),
@@ -3065,24 +3054,64 @@ const TableDirectory = struct {
     }
 };
 
-const Head = packed struct {
-    version: f32,
-    font_revision: f32,
+const Head = struct {
+    version_major: i16,
+    version_minor: i16,
+    font_revision_major: i16,
+    font_revision_minor: i16,
     checksum_adjustment: u32,
     magic_number: u32, // 0x5F0F3CF5
-    flags: u16,
+    flags: Flags,
     units_per_em: u16,
-    created: i64,
-    modified: i64,
+    created_timestamp: i64,
+    modified_timestamp: i64,
     x_min: i16,
     y_min: i16,
     x_max: i16,
     y_max: i16,
-    mac_style: u16,
-    lowest_rec_PPEM: u16,
+    mac_style: MacStyle,
+    lowest_rec_ppem: u16,
     font_direction_hint: i16,
     index_to_loc_format: i16,
     glyph_data_format: i16,
+
+    const Flags = packed struct(u16) {
+        y0_specifies_baseline: bool,
+        left_blackbit_is_lsb: bool,
+        scaled_point_size_differs: bool,
+        use_integer_scaling: bool,
+        reserved_microsoft: bool,
+        layout_vertically: bool,
+        reserved_0: bool,
+        requires_layout_for_ling_rendering: bool,
+        aat_font_with_metamorphosis_effects: bool,
+        strong_right_to_left: bool,
+        indic_style_effects: bool,
+        reserved_adobe_0: bool,
+        reserved_adobe_1: bool,
+        reserved_adobe_2: bool,
+        reserved_adobe_3: bool,
+        simple_generic_symbols: bool,
+    };
+
+    const MacStyle = packed struct(u16) {
+        bold: bool,
+        italic: bool,
+        underline: bool,
+        outline: bool,
+        shadow: bool,
+        extended: bool,
+        unused_bit_6: bool,
+        unused_bit_7: bool,
+        unused_bit_8: bool,
+        unused_bit_9: bool,
+        unused_bit_10: bool,
+        unused_bit_11: bool,
+        unused_bit_12: bool,
+        unused_bit_13: bool,
+        unused_bit_14: bool,
+        unused_bit_15: bool,
+    };
 };
 
 const cff_magic_number: u32 = 0x5F0F3CF5;
@@ -3135,7 +3164,7 @@ const CMAPPlatformSpecificID = packed union {
     macintosh: Macintosh,
 };
 
-const CMAPSubtable = struct {
+const CMAPSubtable = extern struct {
     pub fn fromBigEndianBytes(bytes: []u8) ?CMAPSubtable {
         var table: CMAPSubtable = undefined;
 
@@ -3186,151 +3215,217 @@ const CMAPFormat2 = struct {
     language: u16,
 };
 
-pub fn initializeFont(allocator: Allocator, data: []u8) !FontInfo {
+const SectionRange = struct {
+    offset: u32 = 0,
+    length: u32 = 0,
+
+    pub fn isNull(self: @This()) bool {
+        return self.offset == 0;
+    }
+};
+
+const DataSections = struct {
+    dsig: SectionRange = .{},
+    loca: SectionRange = .{},
+    head: SectionRange = .{},
+    glyf: SectionRange = .{},
+    hhea: SectionRange = .{},
+    hmtx: SectionRange = .{},
+    hvar: SectionRange = .{},
+    kern: SectionRange = .{},
+    gpos: SectionRange = .{},
+    svg: SectionRange = .{},
+    maxp: SectionRange = .{},
+    cmap: SectionRange = .{},
+    name: SectionRange = .{},
+};
+
+pub fn initializeFont(allocator: Allocator, font_data: []u8) !FontInfo {
     _ = allocator;
 
-    var cmap: u32 = 0;
-
-    var font_info: FontInfo = .{
-        .data = data[0..],
-        .loca = .{},
-        .head = .{},
-        .hhea = .{},
-        .hmtx = .{},
-        .glyf = .{},
-        .kern = .{},
-        .gpos = .{},
-        .svg = .{},
-        .maxp = .{},
-        .cff = .{
-            .data = undefined,
-        },
-        .char_strings = .{ .data = undefined },
-        .gsubrs = .{ .data = undefined },
-        .subrs = .{ .data = undefined },
-        .userdata = undefined,
-        .font_dicts = .{ .data = undefined },
-        .fd_select = .{ .data = undefined },
-    };
-
-    // TODO: What is the real allocation size?
-    // font_info.cff = try allocator.alloc(u8, 0);
+    var data_sections = DataSections{};
 
     {
-        const offset_subtable = OffsetSubtable.fromBigEndianBytes(@intToPtr(*align(4) [@sizeOf(OffsetSubtable)]u8, @ptrToInt(data.ptr)));
-        assert(offset_subtable.tables_count < 20);
+        var fixed_buffer_stream = std.io.FixedBufferStream([]const u8){ .buffer = font_data, .pos = 0 };
+        var reader = fixed_buffer_stream.reader();
 
-        var i: u32 = 0;
-        while (i < offset_subtable.tables_count) : (i += 1) {
-            const entry_addr = @intToPtr(*align(4) [@sizeOf(TableDirectory)]u8, @ptrToInt(data.ptr + @sizeOf(OffsetSubtable)) + (@sizeOf(TableDirectory) * i));
-            if (TableDirectory.fromBigEndianBytes(entry_addr)) |table_directory| {
-                var found: bool = false;
-                for (TableTypeList) |valid_tag, valid_tag_i| {
-                    // This is a little silly as we're doing a string comparision
-                    // And then doing a somewhat unnessecary int comparision / jump
-                    if (eql(u8, valid_tag, table_directory.tag[0..])) {
-                        found = true;
-                        switch (@intToEnum(TableType, @intCast(u4, valid_tag_i))) {
-                            .cmap => {
-                                cmap = table_directory.offset;
-                            },
-                            .loca => {
-                                font_info.loca.offset = table_directory.offset;
-                                font_info.loca.length = table_directory.length;
-                            },
-                            .head => {
-                                font_info.head.offset = table_directory.offset;
-                                font_info.head.length = table_directory.length;
-                            },
-                            .glyf => {
-                                font_info.glyf.offset = table_directory.offset;
-                                font_info.glyf.length = table_directory.length;
-                            },
-                            .hhea => {
-                                font_info.hhea.offset = table_directory.offset;
-                                font_info.hhea.length = table_directory.length;
-                            },
-                            .hmtx => {
-                                font_info.hmtx.offset = table_directory.offset;
-                                font_info.hmtx.length = table_directory.length;
-                            },
-                            .kern => {
-                                font_info.loca.offset = table_directory.offset;
-                                font_info.loca.length = table_directory.length;
-                            },
-                            .gpos => {
-                                font_info.gpos.offset = table_directory.offset;
-                                font_info.gpos.length = table_directory.length;
-                            },
-                            .maxp => {
-                                font_info.maxp.offset = table_directory.offset;
-                                font_info.maxp.length = table_directory.length;
-                            },
-                        }
-                    }
-                }
-                found = false;
-            } else {
-                log.warn("Failed to load table directory", .{});
+        const scaler_type = try reader.readIntBig(u32);
+        const tables_count = try reader.readIntBig(u16);
+        const search_range = try reader.readIntBig(u16);
+        const entry_selector = try reader.readIntBig(u16);
+        const range_shift = try reader.readIntBig(u16);
+
+        _ = scaler_type;
+        _ = search_range;
+        _ = entry_selector;
+        _ = range_shift;
+
+        var i: usize = 0;
+        while (i < tables_count) : (i += 1) {
+            var tag_buffer: [4]u8 = undefined;
+            var tag = tag_buffer[0..];
+            _ = try reader.readAll(tag[0..]);
+            const checksum = try reader.readIntBig(u32);
+            // TODO: Use checksum
+            _ = checksum;
+            const offset = try reader.readIntBig(u32);
+            const length = try reader.readIntBig(u32);
+
+            print("{d:2}.    {s}\n", .{ i + 1, tag });
+
+            if (std.mem.eql(u8, "cmap", tag)) {
+                data_sections.cmap.offset = offset;
+                data_sections.cmap.length = length;
+                continue;
+            }
+
+            if (std.mem.eql(u8, "DSIG", tag)) {
+                data_sections.dsig.offset = offset;
+                data_sections.dsig.length = length;
+                continue;
+            }
+
+            if (std.mem.eql(u8, "loca", tag)) {
+                data_sections.loca.offset = offset;
+                data_sections.loca.length = length;
+                continue;
+            }
+
+            if (std.mem.eql(u8, "head", tag)) {
+                data_sections.head.offset = offset;
+                data_sections.head.length = length;
+                continue;
+            }
+
+            if (std.mem.eql(u8, "hvar", tag)) {
+                data_sections.hvar.offset = offset;
+                data_sections.hvar.length = length;
+                continue;
+            }
+
+            if (std.mem.eql(u8, "glyf", tag)) {
+                data_sections.glyf.offset = offset;
+                data_sections.glyf.length = length;
+                continue;
+            }
+
+            if (std.mem.eql(u8, "hhea", tag)) {
+                data_sections.hhea.offset = offset;
+                data_sections.hhea.length = length;
+                continue;
+            }
+
+            if (std.mem.eql(u8, "hmtx", tag)) {
+                data_sections.hmtx.offset = offset;
+                data_sections.hmtx.length = length;
+                continue;
+            }
+
+            if (std.mem.eql(u8, "kern", tag)) {
+                data_sections.kern.offset = offset;
+                data_sections.kern.length = length;
+                continue;
+            }
+
+            if (std.mem.eql(u8, "GPOS", tag)) {
+                data_sections.gpos.offset = offset;
+                data_sections.gpos.length = length;
+                continue;
+            }
+
+            if (std.mem.eql(u8, "maxp", tag)) {
+                data_sections.maxp.offset = offset;
+                data_sections.maxp.length = length;
+                continue;
+            }
+
+            if (std.mem.eql(u8, "name", tag)) {
+                data_sections.name.offset = offset;
+                data_sections.name.length = length;
+                continue;
             }
         }
     }
 
-    font_info.glyph_count = bigToNative(u16, @intToPtr(*u16, @ptrToInt(data.ptr) + font_info.maxp.offset + 4).*);
-
-    std.log.info("Glyphs found: {d}", .{font_info.glyph_count});
-
-    std.debug.assert(font_info.index_to_loc_format == 0 or font_info.index_to_loc_format == 1);
-
-    if (cmap == 0) {
-        return error.RequiredFontTableCmapMissing;
-    }
-
-    if (font_info.head.offset == 0) {
-        return error.RequiredFontTableHeadMissing;
-    }
-
-    if (font_info.hhea.offset == 0) {
-        return error.RequiredFontTableHheaMissing;
-    }
-
-    if (font_info.hmtx.offset == 0) {
-        return error.RequiredFontTableHmtxMissing;
-    }
-
-    font_info.index_to_loc_format = bigToNative(u16, @intToPtr(*u16, @ptrToInt(data.ptr) + font_info.head.offset + 50).*);
-
-    const head = @intToPtr(*Head, @ptrToInt(data.ptr) + font_info.head.offset).*;
-    assert(toNative(u32, head.magic_number, .Big) == 0x5F0F3CF5);
-
-    // Let's read CMAP tables
-    var cmap_index_table = @intToPtr(*CmapIndex, @ptrToInt(data.ptr + cmap)).*;
-
-    cmap_index_table.version = toNative(u16, cmap_index_table.version, .Big);
-    cmap_index_table.subtables_count = toNative(u16, cmap_index_table.subtables_count, .Big);
-
-    assert(@sizeOf(CMAPPlatformID) == 2);
-    assert(@sizeOf(CMAPPlatformSpecificID) == 2);
-
-    font_info.cmap_encoding_table_offset = blk: {
-        var cmap_subtable_index: u32 = 0;
-        while (cmap_subtable_index < cmap_index_table.subtables_count) : (cmap_subtable_index += 1) {
-            assert(@sizeOf(CmapIndex) == 4);
-            assert(@sizeOf(CMAPSubtable) == 8);
-
-            const cmap_subtable_addr: [*]u8 = @intToPtr([*]u8, @ptrToInt(data.ptr) + cmap + @sizeOf(CmapIndex) + (cmap_subtable_index * @sizeOf(CMAPSubtable)));
-            const cmap_subtable = CMAPSubtable.fromBigEndianBytes(cmap_subtable_addr[0..@sizeOf(CMAPSubtable)]).?;
-
-            if (cmap_subtable.platform_id == .microsoft and cmap_subtable.platform_specific_id.unicode != .other) {
-                break :blk cmap + cmap_subtable.offset;
-            }
-        }
-
-        unreachable;
+    var font_info = FontInfo{
+        .data = font_data,
+        .hhea = data_sections.hhea,
     };
 
-    const encoding_format: u16 = toNative(u16, @intToPtr(*u16, @ptrToInt(data.ptr) + font_info.cmap_encoding_table_offset).*, .Big);
-    _ = encoding_format;
+    {
+        std.debug.assert(!data_sections.maxp.isNull());
+
+        var fixed_buffer_stream = std.io.FixedBufferStream([]const u8){ .buffer = font_data, .pos = data_sections.maxp.offset };
+        var reader = fixed_buffer_stream.reader();
+        const version_major = try reader.readIntBig(i16);
+        const version_minor = try reader.readIntBig(i16);
+        _ = version_major;
+        _ = version_minor;
+        font_info.glyph_count = try reader.readIntBig(u16);
+        std.log.info("Glyphs found: {d}", .{font_info.glyph_count});
+    }
+
+    var head: Head = undefined;
+    {
+        var fixed_buffer_stream = std.io.FixedBufferStream([]const u8){ .buffer = font_data, .pos = data_sections.head.offset };
+        var reader = fixed_buffer_stream.reader();
+
+        head.version_major = try reader.readIntBig(i16);
+        head.version_minor = try reader.readIntBig(i16);
+        head.font_revision_major = try reader.readIntBig(i16);
+        head.font_revision_minor = try reader.readIntBig(i16);
+        head.checksum_adjustment = try reader.readIntBig(u32);
+        head.magic_number = try reader.readIntBig(u32);
+
+        if (head.magic_number != 0x5F0F3CF5) {
+            std.log.warn("Magic number not set to 0x5F0F3CF5. File might be corrupt", .{});
+        }
+
+        head.flags = try reader.readStruct(Head.Flags);
+
+        head.units_per_em = try reader.readIntBig(u16);
+        head.created_timestamp = try reader.readIntBig(i64);
+        head.modified_timestamp = try reader.readIntBig(i64);
+
+        head.x_min = try reader.readIntBig(i16);
+        head.y_min = try reader.readIntBig(i16);
+        head.x_max = try reader.readIntBig(i16);
+        head.y_max = try reader.readIntBig(i16);
+
+        head.mac_style = try reader.readStruct(Head.MacStyle);
+
+        head.lowest_rec_ppem = try reader.readIntBig(u16);
+
+        head.font_direction_hint = try reader.readIntBig(i16);
+        head.index_to_loc_format = try reader.readIntBig(i16);
+        head.glyph_data_format = try reader.readIntBig(i16);
+
+        font_info.index_to_loc_format = head.index_to_loc_format;
+
+        std.debug.assert(font_info.index_to_loc_format == 0 or font_info.index_to_loc_format == 1);
+    }
+
+    font_info.cmap_encoding_table_offset = outer: {
+        std.debug.assert(!data_sections.cmap.isNull());
+
+        var fixed_buffer_stream = std.io.FixedBufferStream([]const u8){ .buffer = font_data, .pos = data_sections.cmap.offset };
+        var reader = fixed_buffer_stream.reader();
+
+        const version = try reader.readIntBig(u16);
+        const subtable_count = try reader.readIntBig(u16);
+
+        _ = version;
+
+        var i: usize = 0;
+        while (i < subtable_count) : (i += 1) {
+            const platform_id = try reader.readEnum(PlatformID, .Big);
+            const offset = try reader.readIntBig(u32);
+            std.log.info("Platform: {}", .{platform_id});
+            if (platform_id == .unicode) break :outer data_sections.cmap.offset + offset;
+        }
+        return error.InvalidPlatform;
+    };
+
     return font_info;
 }
 
