@@ -1359,6 +1359,7 @@ fn pixelLineIntersection(x_per_y: f64, point: Point(f64)) Point(f64) {
     const y_per_unit: f64 = if (x_per_y > 0) 1 else -1;
 
     const y_per_x = 1 / x_per_y;
+    _ = y_per_x;
 
     const units_to_left = -point.x / x_per_y;
     const units_to_right = (1.0 - point.x) / x_per_y;
