@@ -750,7 +750,7 @@ fn getGlyphBitmapSubpixel(allocator: Allocator, info: FontInfo, desired_scale: S
     bitmap.height = @intCast(u32, bounding_box.y1 - bounding_box.y0);
 
     if (bitmap.width != 0 and bitmap.height != 0) {
-        bitmap = try rasterize2(allocator, dimensions, vertices, scale.x);
+        bitmap = try rasterize(allocator, dimensions, vertices, scale.x);
     }
 
     return bitmap;
@@ -996,7 +996,7 @@ const LineSegment = struct {
     left: Point(f64),
     right: Point(f64),
 
-    pub fn direction(self: @This()) Direction {
+    pub fn directionSign(self: @This()) Direction {
         const left = self.left;
         const right = self.right;
         if (left.y < right.y) {
@@ -1350,6 +1350,7 @@ fn pixelCurveCoverage(points: []Point(f64)) f64 {
     return 0;
 }
 
+// TODO: Deprecate / remove
 /// Given a point within a pixel and a slope, calculate where it leaves the pixel
 fn pixelLineIntersection(x_per_y: f64, point: Point(f64)) Point(f64) {
     std.debug.assert(x_per_y != 0);
@@ -1357,19 +1358,12 @@ fn pixelLineIntersection(x_per_y: f64, point: Point(f64)) Point(f64) {
     const x_per_unit: f64 = x_per_y;
     const y_per_unit: f64 = if (x_per_y > 0) 1 else -1;
 
-    std.log.info("x_per_y: {d}", .{x_per_y});
-
     const y_per_x = 1 / x_per_y;
 
     const units_to_left = -point.x / x_per_y;
     const units_to_right = (1.0 - point.x) / x_per_y;
     const units_to_top = (1.0 - point.y);
     const units_to_bottom = -point.y;
-
-    std.debug.print("units_to_left: {d}\n", .{units_to_left});
-    std.debug.print("units_to_right: {d}\n", .{units_to_right});
-    std.debug.print("units_to_top: {d}\n", .{units_to_top});
-    std.debug.print("units_to_bottom: {d}\n", .{units_to_bottom});
 
     var best_scale: f64 = std.math.floatMax(f64);
     if (units_to_left > 0 and units_to_left < best_scale)
@@ -1380,12 +1374,6 @@ fn pixelLineIntersection(x_per_y: f64, point: Point(f64)) Point(f64) {
         best_scale = units_to_top;
     if (units_to_bottom > 0 and units_to_bottom < best_scale)
         best_scale = units_to_bottom;
-
-    std.debug.print("Best scale: {d}\n", .{best_scale});
-    std.debug.print("x_per_y: {d}\n", .{x_per_y});
-    std.debug.print("y_per_x: {d}\n", .{y_per_x});
-
-    std.debug.print("Result: {d} {d}\n", .{ point.x + (best_scale), point.y + (best_scale * y_per_x) });
 
     return Point(f64){
         .x = point.x + (best_scale * x_per_unit),
@@ -1523,8 +1511,66 @@ inline fn pixelIndex(pixel_value: f64) usize {
 
 // Requirements:
 // All points lie between y 0.0 and 1.0 inclusively
-// There are either 2 or 4 y intersection points
+// There are either 2 or 4 y intersection points (Not including repeating I.e a straight line)
 // There are at least 2 points that lies between each pixel bounds
+
+// Direction
+//
+//
+//
+
+fn lineCoverage(points: []Point(f64), directions: []Point(f64)) f64 {
+    const index_last: usize = points.len - 1;
+
+    const point_first = points[0];
+    const point_last = points[index_last];
+
+    std.debug.assert(point_first == 0.0 or point_first == 1.0);
+    std.debug.assert(point_last == 0.0 or point_last == 1.0);
+
+    const is_horizontal = (point_first.x == 0 and point_last.x == 0);
+    if (is_horizontal) {
+        var average: f64 = 0;
+        for (points) |point| {
+            average += point.y;
+        }
+        average /= points.len;
+        std.debug.assert(average >= 0.0);
+        std.debug.assert(average <= 1.0);
+        for (directions) |direction| {
+            if (direction.y == 0.0) return average;
+            if (direction.y == 1.0) return 1.0 - average;
+        }
+        unreachable;
+    }
+
+    const is_vertical = (point_first.y == 0 and point_last.y == 0);
+    if (is_vertical) {
+        var average: f64 = 0;
+        for (points) |point| {
+            average += point.x;
+        }
+        average /= points.len;
+        std.debug.assert(average >= 0.0);
+        std.debug.assert(average <= 1.0);
+        for (directions) |direction| {
+            if (direction.x == 0.0) return average;
+            if (direction.x == 1.0) return 1.0 - average;
+        }
+        unreachable;
+    }
+
+    //
+    // This is where sadness begins
+    //
+
+}
+
+// If the shape starts on the right/left, and ends on right/left just calculate average height
+// If the shape starts on the top/bottom, and ends on top/bottom just calculate average distances from leftside
+// Otherwise, use the end / exit points to calculate which corner point to use and do a triangle fan strip
+// You then need to know whether it needs to be inverted
+// I can write manual test cases
 fn rasterizeLineSegment(line: []graphics.RGBA(f32), points: []Point(f64)) void {
     const index_last: usize = points.len - 1;
 
@@ -2019,6 +2065,182 @@ const YIntersection = struct {
     // reasonable t_increment
 };
 
+const TessalatedRegion = struct {
+    const AnchorPoint = struct {
+        point: Point(f64),
+        count: u32,
+    };
+
+    shape_points: []Point(f64), // Should be normalized to inside pixel
+    anchor_points: []AnchorPoint, // Should all be on bounds of pixel
+
+    pub fn calculateArea(self: @This()) f64 {
+        var coverage: f64 = 0.0;
+        var point_index: usize = 0;
+        for (self.anchor_points) |anchor_point| {
+            var i: usize = 0;
+            while (i < anchor_point.count - 1) : (i += 1) {
+                coverage += triangleArea(self.shape_points[point_index], self.shape_points[point_index + 1], anchor_point.point);
+                point_index += 1;
+            }
+        }
+        std.debug.assert(coverage >= 0.0);
+        std.debug.assert(coverage <= 1.0);
+        return coverage;
+    }
+};
+
+/// Given two points, one that lies inside a normalized boundry and one that lies outside
+/// Interpolate a point between them that lies on the boundry of the imaginary 1x1 square
+fn interpolateBoundryPoint(inside: Point(f64), outside: Point(f64)) Point(f64) {
+    std.debug.assert(inside.x >= 0.0);
+    std.debug.assert(inside.x <= 1.0);
+    std.debug.assert(inside.y >= 0.0);
+    std.debug.assert(inside.y <= 1.0);
+    std.debug.assert(outside.x >= 1.0 or outside.x <= 0.0 or outside.y >= 1.0 or outside.y <= 0.0);
+
+    if (outside.x == inside.x) {
+        return Point(f64){
+            .x = outside.x,
+            .y = if (outside.y > inside.y) 1.0 else 0.0,
+        };
+    }
+
+    if (outside.y == inside.y) {
+        return Point(f64){
+            .x = if (outside.x > inside.x) 1.0 else 0.0,
+            .y = outside.y,
+        };
+    }
+
+    const x_difference: f64 = outside.x - inside.x;
+    const y_difference: f64 = outside.y - inside.y;
+    const t: f64 = blk: {
+        //
+        // Based on lerp function `a - (b - a) * t = p`. Can be rewritten as follows:
+        // `(-a + p) / (b - a) = t` where p is our desired value in the spectrum
+        // 0.0 or 1.0 in our case, as they represent the left and right (Or top and bottom) sides of the pixel
+        // We know whether we want 0.0 or 1.0 based on where the outside point lies in relation to the inside point
+        //
+        // Taking the x axis for example, if the outside point is to the right of our pixel bounds, we know that
+        // we're looking a p value of 1.0 as the line moves from left to right, otherwise it would be 0.0.
+        //
+        const side_x: f64 = if (inside.x > outside.x) 0.0 else 1.0;
+        const side_y: f64 = if (inside.y > outside.y) 0.0 else 1.0;
+        const t_x: f64 = (-inside.x + side_x) / (x_difference);
+        const t_y: f64 = (-inside.y + side_y) / (y_difference);
+        break :blk if (t_x > 1.0 or t_x < 0.0 or t_y < t_x) t_y else t_x;
+    };
+
+    std.debug.assert(t >= 0.0);
+    std.debug.assert(t <= 1.0);
+
+    return Point(f64){
+        .x = inside.x + (x_difference * t),
+        .y = inside.y + (y_difference * t),
+    };
+}
+
+test "interpolateBoundryPoint" {
+    {
+        const in = Point(f64){
+            .x = 0.5,
+            .y = 0.5,
+        };
+        const out = Point(f64){
+            .x = -2.0,
+            .y = 0.5,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 0.5);
+        try std.testing.expect(result.x == 0.0);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 0.5,
+            .y = 0.5,
+        };
+        const out = Point(f64){
+            .x = 2.0,
+            .y = 0.5,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 0.5);
+        try std.testing.expect(result.x == 1.0);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 0.5,
+            .y = 0.5,
+        };
+        const out = Point(f64){
+            .x = 0.5,
+            .y = 2.0,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 1.0);
+        try std.testing.expect(result.x == 0.5);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 0.25,
+            .y = 0.25,
+        };
+        const out = Point(f64){
+            .x = 1.5,
+            .y = 2.0,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 1.0);
+        try std.testing.expect(result.x == 0.7857142857142857);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 0.75,
+            .y = 0.25,
+        };
+        const out = Point(f64){
+            .x = -1.5,
+            .y = 2.0,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 0.8333333333333333);
+        try std.testing.expect(result.x == 0.0);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 0.0,
+            .y = 0.0,
+        };
+        const out = Point(f64){
+            .x = -1.5,
+            .y = -2.0,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 0.0);
+        try std.testing.expect(result.x == 0.0);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 1.0,
+            .y = 1.0,
+        };
+        const out = Point(f64){
+            .x = 2.5,
+            .y = 1.0,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 1.0);
+        try std.testing.expect(result.x == 1.0);
+    }
+}
+
 const Outline = struct {
     contours: []Contour,
 
@@ -2028,6 +2250,13 @@ const Outline = struct {
         std.debug.assert(contour_index < self.contours.len);
         return self.contours[contour_index].sample(t - t_floored);
     }
+
+    // Sampled point on the line
+    // Direction? (This can be calculated / guessed)
+
+    // pub fn calculateAreaForPixel(self: @This(), base_point: SampledPoint, direction_sign: f64) !f64 {
+
+    // }
 
     // When a fill region is ended, the direction around the contour will be negative
     pub fn sampleAtDistance(self: @This(), ideal: f64, threshold: f64, base_point: SampledPoint) SampledPoint {
@@ -2051,10 +2280,6 @@ const Outline = struct {
         // This function cannot fail (Barring a bug in the code), as an outline is a closed loop
         unreachable;
     }
-
-    // pub fn horizontalIntersections(self: @This(), buffer: []YIntersection, x_axis: f64) []YIntersection {
-    //     //
-    // }
 };
 
 const YIntersectionPair = struct {
@@ -2110,6 +2335,7 @@ const SampledPoint = struct {
 // If you have previous intersections, you can use them to fill in middle (Have to check for concave curves though)
 //
 
+// Would be better to do two scanlines at a time, upper and lower
 fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
     std.log.info("Glyph bbox {d} x {d} -- {d} x {d}", .{
         min_x,
@@ -2231,16 +2457,17 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
 
             switch (kind) {
                 .line => {
+                    // Vertical
                     if (point_a.x == point_b.x) {
                         try current_scanline.add(.{ .x_position = point_a.x, .outline_index = vertex_i }, "vertical");
-                        continue;
+                    } else {
+                        try current_scanline.add(
+                            .{ .x_position = horizontalPlaneIntersection(scanline_y, point_a, point_b), .outline_index = vertex_i },
+                            "line",
+                        );
                     }
-                    try current_scanline.add(.{ .x_position = horizontalPlaneIntersection(scanline_y, point_a, point_b), .outline_index = vertex_i }, "line");
                 },
                 .curve => {
-                    //
-                    // How do we
-                    //
                     const bezier = BezierQuadratic{ .a = point_b, .b = point_a, .control = .{
                         .x = @intToFloat(f64, current_vertex.control1_x) * scale,
                         .y = @intToFloat(f64, current_vertex.control1_y) * scale,
@@ -2264,7 +2491,6 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                 },
                 else => {
                     std.log.warn("Kind: {}", .{kind});
-                    continue;
                 },
             }
         }
@@ -2392,10 +2618,14 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                     std.debug.assert(contour_index > 0);
                     const sv1 = vertices[contour_index];
                     const sv2 = vertices[contour_index - 1];
-                    var bezier = BezierQuadratic{ .a = .{ .x = @intToFloat(f64, sv2.x) * scale, .y = @intToFloat(f64, sv2.y) * scale }, .b = .{ .x = @intToFloat(f64, sv1.x) * scale, .y = @intToFloat(f64, sv1.y) * scale }, .control = .{
-                        .x = @intToFloat(f64, sv1.control1_x) * scale,
-                        .y = @intToFloat(f64, sv1.control1_y) * scale,
-                    } };
+                    var bezier = BezierQuadratic{
+                        .a = .{ .x = @intToFloat(f64, sv2.x) * scale, .y = @intToFloat(f64, sv2.y) * scale },
+                        .b = .{ .x = @intToFloat(f64, sv1.x) * scale, .y = @intToFloat(f64, sv1.y) * scale },
+                        .control = .{
+                            .x = @intToFloat(f64, sv1.control1_x) * scale,
+                            .y = @intToFloat(f64, sv1.control1_y) * scale,
+                        },
+                    };
                     const t_start = scanline_start.t.?;
                     var t_increment: f64 = 0.005;
 
@@ -2413,8 +2643,10 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                                 break :blk quadraticBezierPoint(bezier, current_t);
                             }
 
-                            std.debug.assert(false);
-
+                            //
+                            // If our current contour is a line, we want to ignore current_t, and return
+                            // where the line leaves our current pixel.
+                            //
                             const previous_contour = if (contour_index == 0) vertices.len - 1 else contour_index - 1;
                             const v1 = vertices[previous_contour];
                             const v2 = vertices[contour_index];
@@ -2448,11 +2680,11 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                         std.log.info("Sampled point {d}, {d}", .{ sampled_point.x, sampled_point.y });
 
                         const sampled_pixel_x = @floatToInt(usize, @floor(sampled_point.x));
+                        const sampled_pixel_y = @floatToInt(u32, @floor(sampled_point.y));
                         var sampled_point_rel = Point(f64){
                             .x = sampled_point.x - @intToFloat(f64, current_x_pixel),
                             .y = sampled_point.y - scanline_y,
                         };
-                        const sampled_pixel_y = @floatToInt(u32, @floor(sampled_point.y));
 
                         // Sampled pixel is above scanline (End Anti-aliasing condition)
                         if (sampled_pixel_y > scanline_y_index) {
@@ -2481,6 +2713,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
 
                         // Sampled pixel is below scanline (End Anti-aliasing condition)
                         if (sampled_pixel_y != scanline_y_index) {
+                            std.debug.assert(sampled_pixel_y < scanline_y_index);
                             std.log.info("Reached bottom of scanline. Last {d}, {d}. Sampled {d}, {d}", .{
                                 last_point_rel.x,
                                 last_point_rel.y,
@@ -2521,7 +2754,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
 
                         // Advance to right pixel
                         if (sampled_pixel_x > current_x_pixel) {
-                            std.debug.assert(sampled_pixel_x == (current_x_pixel + 1));
+                            std.debug.assert(sampled_pixel_x == (current_x_pixel + 1)); // TODO: ?
                             std.debug.assert(sampled_pixel_x <= scanline_end_x_pixel);
                             // Interpolate point on the right x boundry, insert and calc coverage for current pixel
                             const change_in_y: f64 = sampled_point_rel.y - last_point_rel.y;
@@ -2909,7 +3142,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                     bitmap.pixels[start_x + (image_y_index * dimensions.width)] = pixelFill(@rem(scanline_end.x_position, 1.0));
                     full_fill_index_end = if (start_x == 0) 0 else start_x - 1;
                 } else {
-                    const direction = line_end.direction();
+                    const direction = line_end.directionSign();
                     const is_positive: bool = (direction == .positive);
                     const end_x = if (direction == .positive) dimensions.width else full_fill_index_start;
                     const increment: i32 = if (direction == .positive) 1 else -1;
