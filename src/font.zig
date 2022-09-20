@@ -884,7 +884,7 @@ const Intersection = struct {
 };
 
 const IntersectionList = struct {
-    buffer: []Intersection,
+    buffer: [64]Intersection,
     count: u32 = 0,
 
     pub fn reset(self: *@This()) void {
@@ -2124,7 +2124,7 @@ fn interpolateBoundryPoint(inside: Point(f64), outside: Point(f64)) Point(f64) {
         // We know whether we want 0.0 or 1.0 based on where the outside point lies in relation to the inside point
         //
         // Taking the x axis for example, if the outside point is to the right of our pixel bounds, we know that
-        // we're looking a p value of 1.0 as the line moves from left to right, otherwise it would be 0.0.
+        // we're looking for a p value of 1.0 as the line moves from left to right, otherwise it would be 0.0.
         //
         const side_x: f64 = if (inside.x > outside.x) 0.0 else 1.0;
         const side_y: f64 = if (inside.y > outside.y) 0.0 else 1.0;
@@ -2336,6 +2336,128 @@ const SampledPoint = struct {
 // If you have previous intersections, you can use them to fill in middle (Have to check for concave curves though)
 //
 
+fn caclulateHorizontalLineIntersections(scanline_y: f64, vertices: []Vertex, scale: f32) !IntersectionList {
+    const printf = std.debug.print;
+    var current_scanline = IntersectionList{ .buffer = undefined, .count = 0 };
+    var vertex_i: u32 = 1;
+    while (vertex_i < vertices.len) : (vertex_i += 1) {
+        const previous_vertex = vertices[vertex_i - 1];
+        const current_vertex = vertices[vertex_i];
+        const kind = @intToEnum(VMove, current_vertex.kind);
+
+        if (kind == .move) {
+            continue;
+        }
+
+        const point_a = Point(f64){
+            .x = @intToFloat(f64, current_vertex.x) * scale,
+            .y = @intToFloat(f64, current_vertex.y) * scale,
+        };
+        const point_b = Point(f64){
+            .x = @intToFloat(f64, previous_vertex.x) * scale,
+            .y = @intToFloat(f64, previous_vertex.y) * scale,
+        };
+
+        if (kind == .line) {
+            printf("  Vertex (line) {d:^5.2} x {d:^5.2} --> {d:^5.2} x {d:^5.2} -- ", .{ point_a.x, point_a.y, point_b.x, point_b.y });
+        } else if (kind == .curve) {
+            printf("  Vertex (curve) A({d:.2}, {d:.2}) --> B({d:.2}, {d:.2}) C ({d:.2}, {d:.2}) -- ", .{
+                point_b.x,
+                point_b.y,
+                point_a.x,
+                point_a.y,
+                @intToFloat(f64, current_vertex.control1_x) * scale,
+                @intToFloat(f64, current_vertex.control1_y) * scale,
+            });
+        }
+
+        const is_horizontal = current_vertex.y == previous_vertex.y;
+        if (is_horizontal) {
+            printf("REJECT - Horizonatal line\n", .{});
+            continue;
+        }
+
+        const is_outsize_y_range = blk: {
+            const max_yy = @maximum(point_a.y, point_b.y);
+            const min_yy = @minimum(point_a.y, point_b.y);
+            std.debug.assert(max_yy >= min_yy);
+            if (scanline_y > max_yy or scanline_y < min_yy) {
+                break :blk true;
+            }
+            if (kind == .curve) {
+                const bezier = BezierQuadratic{ .a = point_a, .b = point_b, .control = .{
+                    .x = @intToFloat(f64, current_vertex.control1_x) * scale,
+                    .y = @intToFloat(f64, current_vertex.control1_y) * scale,
+                } };
+                const inflection_y = quadradicBezierInflectionPoint(bezier).y;
+                const is_middle_higher = (inflection_y > max_yy) and scanline_y > inflection_y;
+                const is_middle_lower = (inflection_y < min_yy) and scanline_y < inflection_y;
+                if (is_middle_higher or is_middle_lower) {
+                    break :blk true;
+                }
+            }
+            break :blk false;
+        };
+
+        if (is_outsize_y_range) {
+            printf("REJECT - Outsize Y range\n", .{});
+            continue;
+        }
+
+        switch (kind) {
+            .line => {
+                // Vertical
+                if (point_a.x == point_b.x) {
+                    try current_scanline.add(.{ .x_position = point_a.x, .outline_index = vertex_i }, "vertical");
+                } else {
+                    try current_scanline.add(
+                        .{ .x_position = horizontalPlaneIntersection(scanline_y, point_a, point_b), .outline_index = vertex_i },
+                        "line",
+                    );
+                }
+            },
+            .curve => {
+                const bezier = BezierQuadratic{ .a = point_b, .b = point_a, .control = .{
+                    .x = @intToFloat(f64, current_vertex.control1_x) * scale,
+                    .y = @intToFloat(f64, current_vertex.control1_y) * scale,
+                } };
+                const optional_intersection_points = quadraticBezierPlaneIntersections(bezier, scanline_y);
+                if (optional_intersection_points[0]) |first_intersection| {
+                    try current_scanline.add(.{ .x_position = first_intersection.x, .t = first_intersection.t, .outline_index = vertex_i }, "curve 1");
+                    if (optional_intersection_points[1]) |second_intersection| {
+                        const x_diff_threshold = 0.001;
+                        if (@fabs(second_intersection.x - first_intersection.x) > x_diff_threshold) {
+                            try current_scanline.add(.{ .x_position = second_intersection.x, .t = second_intersection.t, .outline_index = vertex_i }, "curve 2");
+                        }
+                    }
+                } else if (optional_intersection_points[1]) |second_intersection| {
+                    try current_scanline.add(.{
+                        .x_position = second_intersection.x,
+                        .t = second_intersection.t,
+                        .outline_index = vertex_i,
+                    }, "curve 2 only");
+                }
+            },
+            else => {
+                std.log.warn("Kind: {}", .{kind});
+            },
+        }
+    }
+
+    // We have to sort by x ascending
+    var step: usize = 1;
+    while (step < current_scanline.count) : (step += 1) {
+        const key = current_scanline.buffer[step];
+        var x = @intCast(i64, step) - 1;
+        while (x >= 0 and current_scanline.buffer[@intCast(usize, x)].x_position > key.x_position) : (x -= 1) {
+            current_scanline.buffer[@intCast(usize, x) + 1] = current_scanline.buffer[@intCast(usize, x)];
+        }
+        current_scanline.buffer[@intCast(usize, x + 1)] = key;
+    }
+
+    return current_scanline;
+}
+
 // Would be better to do two scanlines at a time, upper and lower
 fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
     std.log.info("Glyph bbox {d} x {d} -- {d} x {d}", .{
@@ -2350,170 +2472,26 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
         .height = @intCast(u32, dimensions.height),
         .pixels = try allocator.alloc(graphics.RGBA(f32), bitmap_pixel_count),
     };
-    const null_pixel = graphics.RGBA(f32){
-        .r = 0.0,
-        .g = 0.0,
-        .b = 0.0,
-        .a = 0.0,
-    };
+    const null_pixel = graphics.RGBA(f32){ .r = 0.0, .g = 0.0, .b = 0.0, .a = 0.0 };
     std.mem.set(graphics.RGBA(f32), bitmap.pixels, null_pixel);
 
-    // var outline_count: usize = 0;
-    // for (vertices) |vertex| {
-    //     if (@intToEnum(VMove, vertex.kind) == .move) {
-    //         outline_count += 1;
-    //     }
-    // }
-    // std.debug.info("Outlines: {d}", .{outline_count});
-
-    // var outlines = try allocator.alloc(Outline, outline_count);
-
     std.log.info("Rasterizing image of dimensions: {d} x {d}", .{ bitmap.width, bitmap.height });
-    const printf = std.debug.print;
-
-    var scanline_buffer_a: [64]Intersection = undefined;
-    var scanline_buffer_b: [64]Intersection = undefined;
-
     printVertices(vertices, scale);
 
     for (vertices) |*vertex| {
         vertex.is_active = 0;
     }
 
-    var current_scanline = IntersectionList{ .buffer = scanline_buffer_a[0..], .count = 0 };
-    var previous_scanline = IntersectionList{ .buffer = scanline_buffer_b[0..], .count = 0 };
-
     var scanline_y_index: i32 = @intCast(i32, dimensions.height) - 1;
     while (scanline_y_index >= 0) : (scanline_y_index -= 1) {
-        current_scanline.reset();
         const scanline_y = @intToFloat(f64, scanline_y_index);
         const image_y_index = (dimensions.height - 1) - @intCast(u32, scanline_y_index);
-
-        printf("Scanline {d}, image Y {d}\n", .{ scanline_y_index, image_y_index });
-        // Loop through all vertices and store line intersections
-        var vertex_i: u32 = 1;
-        while (vertex_i < vertices.len) : (vertex_i += 1) {
-            const previous_vertex = vertices[vertex_i - 1];
-            const current_vertex = vertices[vertex_i];
-            const kind = @intToEnum(VMove, current_vertex.kind);
-
-            if (kind == .move) {
-                continue;
-            }
-
-            const point_a = Point(f64){
-                .x = @intToFloat(f64, current_vertex.x) * scale,
-                .y = @intToFloat(f64, current_vertex.y) * scale,
-            };
-            const point_b = Point(f64){
-                .x = @intToFloat(f64, previous_vertex.x) * scale,
-                .y = @intToFloat(f64, previous_vertex.y) * scale,
-            };
-
-            if (kind == .line) {
-                printf("  Vertex (line) {d:^5.2} x {d:^5.2} --> {d:^5.2} x {d:^5.2} -- ", .{ point_a.x, point_a.y, point_b.x, point_b.y });
-            } else if (kind == .curve) {
-                printf("  Vertex (curve) A({d:.2}, {d:.2}) --> B({d:.2}, {d:.2}) C ({d:.2}, {d:.2}) -- ", .{
-                    point_b.x,
-                    point_b.y,
-                    point_a.x,
-                    point_a.y,
-                    @intToFloat(f64, current_vertex.control1_x) * scale,
-                    @intToFloat(f64, current_vertex.control1_y) * scale,
-                });
-            }
-
-            const is_horizontal = current_vertex.y == previous_vertex.y;
-            if (is_horizontal) {
-                printf("REJECT - Horizonatal line\n", .{});
-                continue;
-            }
-
-            const is_outsize_y_range = blk: {
-                const max_yy = @maximum(point_a.y, point_b.y);
-                const min_yy = @minimum(point_a.y, point_b.y);
-                std.debug.assert(max_yy >= min_yy);
-                if (scanline_y > max_yy or scanline_y < min_yy) {
-                    break :blk true;
-                }
-                if (kind == .curve) {
-                    const bezier = BezierQuadratic{ .a = point_a, .b = point_b, .control = .{
-                        .x = @intToFloat(f64, current_vertex.control1_x) * scale,
-                        .y = @intToFloat(f64, current_vertex.control1_y) * scale,
-                    } };
-                    const inflection_y = quadradicBezierInflectionPoint(bezier).y;
-                    const is_middle_higher = (inflection_y > max_yy) and scanline_y > inflection_y;
-                    const is_middle_lower = (inflection_y < min_yy) and scanline_y < inflection_y;
-                    if (is_middle_higher or is_middle_lower) {
-                        break :blk true;
-                    }
-                }
-                break :blk false;
-            };
-
-            if (is_outsize_y_range) {
-                printf("REJECT - Outsize Y range\n", .{});
-                continue;
-            }
-
-            switch (kind) {
-                .line => {
-                    // Vertical
-                    if (point_a.x == point_b.x) {
-                        try current_scanline.add(.{ .x_position = point_a.x, .outline_index = vertex_i }, "vertical");
-                    } else {
-                        try current_scanline.add(
-                            .{ .x_position = horizontalPlaneIntersection(scanline_y, point_a, point_b), .outline_index = vertex_i },
-                            "line",
-                        );
-                    }
-                },
-                .curve => {
-                    const bezier = BezierQuadratic{ .a = point_b, .b = point_a, .control = .{
-                        .x = @intToFloat(f64, current_vertex.control1_x) * scale,
-                        .y = @intToFloat(f64, current_vertex.control1_y) * scale,
-                    } };
-                    const optional_intersection_points = quadraticBezierPlaneIntersections(bezier, scanline_y);
-                    if (optional_intersection_points[0]) |first_intersection| {
-                        try current_scanline.add(.{ .x_position = first_intersection.x, .t = first_intersection.t, .outline_index = vertex_i }, "curve 1");
-                        if (optional_intersection_points[1]) |second_intersection| {
-                            const x_diff_threshold = 0.001;
-                            if (@fabs(second_intersection.x - first_intersection.x) > x_diff_threshold) {
-                                try current_scanline.add(.{ .x_position = second_intersection.x, .t = second_intersection.t, .outline_index = vertex_i }, "curve 2");
-                            }
-                        }
-                    } else if (optional_intersection_points[1]) |second_intersection| {
-                        try current_scanline.add(.{
-                            .x_position = second_intersection.x,
-                            .t = second_intersection.t,
-                            .outline_index = vertex_i,
-                        }, "curve 2 only");
-                    }
-                },
-                else => {
-                    std.log.warn("Kind: {}", .{kind});
-                },
-            }
-        }
-
+        const current_scanline = try caclulateHorizontalLineIntersections(scanline_y, vertices, scale);
         if (current_scanline.count == 0) {
             std.log.warn("No intersections found", .{});
             continue;
         }
         std.debug.assert(current_scanline.count % 2 == 0);
-
-        {
-            // We have to sort by x ascending
-            var step: usize = 1;
-            while (step < current_scanline.count) : (step += 1) {
-                const key = current_scanline.buffer[step];
-                var x = @intCast(i64, step) - 1;
-                while (x >= 0 and current_scanline.buffer[@intCast(usize, x)].x_position > key.x_position) : (x -= 1) {
-                    current_scanline.buffer[@intCast(usize, x) + 1] = current_scanline.buffer[@intCast(usize, x)];
-                }
-                current_scanline.buffer[@intCast(usize, x + 1)] = key;
-            }
-        }
 
         var i: u32 = 0;
         while (i < (current_scanline.count - 1)) : (i += 2) {
@@ -2547,26 +2525,6 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                     .y = @intToFloat(f64, right.y) * scale,
                 } };
             };
-
-            // std.debug.print("Intersection pair:\n", .{});
-            // std.debug.print("  V {d} Curve {} P1 ({d:.2}, {d:.2}) -> P2 ({d:.2}, {d:.2}): intersection {d}\n", .{
-            //     scanline_start.outline_index,
-            //     scanline_start.isCurve(),
-            //     line_start.left.x,
-            //     line_start.left.y,
-            //     line_start.right.x,
-            //     line_start.right.y,
-            //     scanline_start.x_position,
-            // });
-            // std.debug.print("  V {d} Curve {} P1 ({d:.2}, {d:.2}) -> P2 ({d:.2}, {d:.2}): intersection {d}\n", .{
-            //     scanline_end.outline_index,
-            //     scanline_end.isCurve(),
-            //     line_end.left.x,
-            //     line_end.left.y,
-            //     line_end.right.x,
-            //     line_end.right.y,
-            //     scanline_end.x_position,
-            // });
 
             // TODO: Check here if there is a horizonal line between the start
             //       and end intersections. Do the fill and return
@@ -3221,10 +3179,6 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                 bitmap.pixels[current_x + (image_y_index * dimensions.width)] = pixelFill(1.0); // 255;
             }
         }
-        const temp_buffer = previous_scanline.buffer;
-        previous_scanline = current_scanline;
-        current_scanline.buffer = temp_buffer;
-        current_scanline.reset();
     }
     return bitmap;
 }
