@@ -8,6 +8,7 @@ const vulkan_config = @import("vulkan_config.zig");
 const geometry = @import("geometry.zig");
 const graphics = @import("graphics.zig");
 const font = @import("font.zig");
+const shaders = @import("shaders");
 
 const wayland = @import("wayland");
 const wl = wayland.client.wl;
@@ -138,9 +139,6 @@ const enable_blending = true;
 const asset_path_font = "./assets/RobotoMono.ttf";
 
 var glyphs: GlyphSet = undefined;
-
-const fragment_shader_path = "shaders/generic.frag.spv";
-const vertex_shader_path = "shaders/generic.vert.spv";
 
 // NOTE: The following points aren't used in the code, but are useful to know
 // http://anki3d.org/vulkan-coordinate-system/
@@ -1393,8 +1391,8 @@ fn setup(allocator: std.mem.Allocator, app: *GraphicsContext) !void {
         i += 1;
     }
 
-    app.vertex_shader_module = try createVertexShaderModule(app.*, vertex_shader_path);
-    app.fragment_shader_module = try createFragmentShaderModule(app.*, fragment_shader_path);
+    app.vertex_shader_module = try createVertexShaderModule(app.*);
+    app.fragment_shader_module = try createFragmentShaderModule(app.*);
 
     std.debug.assert(app.swapchain_images.len > 0);
 
@@ -2316,21 +2314,19 @@ fn createFramebuffers(allocator: std.mem.Allocator, app: GraphicsContext) ![]vk.
 //   6. Vulkan Util / Wrapper Functions
 //
 
-fn createFragmentShaderModule(app: GraphicsContext, comptime shader_path: []const u8) !vk.ShaderModule {
-    const shader_fragment_spv align(4) = @embedFile(shader_path);
+fn createFragmentShaderModule(app: GraphicsContext) !vk.ShaderModule {
     const create_info = vk.ShaderModuleCreateInfo{
-        .code_size = shader_fragment_spv.len,
-        .p_code = @ptrCast([*]const u32, shader_fragment_spv),
+        .code_size = shaders.fragment_spv.len,
+        .p_code = @ptrCast([*]const u32, shaders.fragment_spv),
         .flags = .{},
     };
     return try app.device_dispatch.createShaderModule(app.logical_device, &create_info, null);
 }
 
-fn createVertexShaderModule(app: GraphicsContext, comptime shader_path: []const u8) !vk.ShaderModule {
-    const shader_vertex_spv align(4) = @embedFile(shader_path);
+fn createVertexShaderModule(app: GraphicsContext) !vk.ShaderModule {
     const create_info = vk.ShaderModuleCreateInfo{
-        .code_size = shader_vertex_spv.len,
-        .p_code = @ptrCast([*]const u32, shader_vertex_spv),
+        .code_size = shaders.vertex_spv.len,
+        .p_code = @ptrCast([*]const u32, shaders.vertex_spv),
         .flags = .{},
     };
     return try app.device_dispatch.createShaderModule(app.logical_device, &create_info, null);
