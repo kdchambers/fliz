@@ -37,6 +37,11 @@ pub fn build(b: *Builder) void {
     });
     exe.step.dependOn(&scanner.step);
 
+    exe.addPackage(.{
+        .name = "shaders",
+        .source = .{ .path = "shaders/shaders.zig" },
+    });
+
     exe.linkLibC();
     exe.linkSystemLibrary("wayland-client");
 
