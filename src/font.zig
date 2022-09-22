@@ -362,11 +362,303 @@ const GlyhHeader = extern struct {
 // y_coordinates: [*]u8,
 // };
 
-var min_x: i16 = undefined;
-var min_y: i16 = undefined;
-var max_x: i16 = undefined;
-var max_y: i16 = undefined;
-var glyph_dimensions: geometry.Dimensions2D(u32) = undefined;
+// loadOutlines()
+fn getGlyphShape2(allocator: Allocator, info: FontInfo, glyph_index: i32) ![]Outline {
+    if (info.cff.size != 0) {
+        return error.CffFound;
+    }
+
+    // TODO:
+    const data = info.data;
+
+    var vertices: []Vertex = undefined;
+    var vertices_count: u32 = 0;
+
+    // Find the byte offset of the glyh table
+    const glyph_offset = try getGlyfOffset(info, glyph_index);
+    const glyph_offset_index: usize = @ptrToInt(data.ptr) + glyph_offset;
+
+    if (glyph_offset < 0) {
+        return error.InvalidGlypOffset;
+    }
+
+    // Beginning of the glyf table
+    // See: https://docs.microsoft.com/en-us/typography/opentype/spec/glyf
+    const contour_count_signed = readBigEndian(i16, glyph_offset_index);
+
+    const min_x = readBigEndian(i16, glyph_offset_index + 2);
+    const min_y = readBigEndian(i16, glyph_offset_index + 4);
+    const max_x = readBigEndian(i16, glyph_offset_index + 6);
+    const max_y = readBigEndian(i16, glyph_offset_index + 8);
+
+    std.log.info("Glyph vertex range: min {d} x {d} max {d} x {d}", .{ min_x, min_y, max_x, max_y });
+    std.log.info("Stripped dimensions {d} x {d}", .{ max_x - min_x, max_y - min_y });
+
+    // const glyph_dimensions = geometry.Dimensions2D(u32) {
+    //     .width = @intCast(u32, max_x - min_x + 1),
+    //     .height = @intCast(u32, max_y - min_y + 1)
+    // };
+
+    if (contour_count_signed > 0) {
+        const contour_count: u32 = @intCast(u16, contour_count_signed);
+
+        var j: i32 = 0;
+        var m: u32 = 0;
+        var n: u16 = 0;
+
+        // Index of the next point that begins a new contour
+        // This will correspond to value after end_points_of_contours
+        var next_move: i32 = 0;
+
+        var off: usize = 0;
+
+        // end_points_of_contours is located directly after GlyphHeader in the glyf table
+        const end_points_of_contours = @intToPtr([*]u16, glyph_offset_index + @sizeOf(GlyhHeader));
+        const end_points_of_contours_size = @intCast(usize, contour_count * @sizeOf(u16));
+
+        const simple_glyph_table_index = glyph_offset_index + @sizeOf(GlyhHeader);
+
+        // Get the size of the instructions so we can skip past them
+        const instructions_size_bytes = readBigEndian(i16, simple_glyph_table_index + end_points_of_contours_size);
+
+        var glyph_flags: [*]u8 = @intToPtr([*]u8, glyph_offset_index + @sizeOf(GlyhHeader) + (@intCast(usize, contour_count) * 2) + 2 + @intCast(usize, instructions_size_bytes));
+
+        // NOTE: The number of flags is determined by the last entry in the endPtsOfContours array
+        n = 1 + readBigEndian(u16, @ptrToInt(end_points_of_contours) + (@intCast(usize, contour_count - 1) * 2));
+
+        const x_coords = glyph_flags[n .. n * 2];
+        const y_coords = glyph_flags[n * 2 .. n * 3];
+
+        // What is m here?
+        // Size of contours
+        {
+            // Allocate space for all the flags, and vertices
+            m = n + (2 * contour_count);
+            vertices = try allocator.alloc(Vertex, @intCast(usize, m));
+
+            assert((m - n) > 0);
+            off = (2 * contour_count);
+        }
+
+        {
+            //
+            // Construction
+            //
+            var i: usize = 0;
+            var flag_repeat_count: i32 = 0;
+            var x_index: u32 = 0;
+            var y_index: u32 = 0;
+            var flag_index: u32 = 0;
+            // On curve points
+            var x: i16 = 0;
+            var y: i16 = 0;
+            // Off curve (bezier control) points
+            // var control_x: i16 = 0;
+            // var control_y: i16 = 0;
+
+            // var next_outline_end_index = end_points_of_contours[0];
+
+            while (i < n) : (i += 1) {
+                const flags = glyph_flags[flag_index];
+                if (flag_repeat_count <= 0) {
+                    if (isFlagSet(flags, GlyphFlags.repeat_flag)) {
+                        flag_repeat_count = glyph_flags[i + 1];
+                        i += 1;
+                    }
+                    flag_index += 1;
+                }
+                flag_repeat_count -= 1;
+
+                //
+                // Load x coordinates
+                //
+                if (isFlagSet(flags, GlyphFlags.x_short_vector)) {
+                    const dx: i16 = x_coords[x_index];
+                    x += if (isFlagSet(flags, GlyphFlags.positive_x_short_vector)) dx else -dx;
+                    x_index += 1;
+                } else {
+                    if (!isFlagSet(flags, GlyphFlags.same_x)) {
+                        // The current x-coordinate is a signed 16-bit delta vector
+                        x += (@intCast(i16, x_coords[x_index]) << 8) + x_coords[x_index + 1];
+                        x_index += 2;
+                    } else {
+                        // If `!x_short_vector` and `same_x` then the same `x` value shall be appended
+                        // https://learn.microsoft.com/en-us/typography/opentype/spec/glyf
+                        // See: X_IS_SAME_OR_POSITIVE_X_SHORT_VECTOR
+                    }
+                }
+
+                //
+                // Load y coordinates
+                //
+                if (isFlagSet(flags, GlyphFlags.y_short_vector)) {
+                    const dy: i16 = y_coords[y_index];
+                    y_index += 1;
+                    y += if (isFlagSet(flags, GlyphFlags.positive_y_short_vector)) dy else -dy;
+                } else {
+                    if (!isFlagSet(flags, GlyphFlags.same_y)) {
+                        // The current y-coordinate is a signed 16-bit delta vector
+                        y += (@intCast(i16, y_coords[y_index]) << 8) + y_coords[y_index + 1];
+                        y_index += 2;
+                    } else {
+                        // If `!y_short_vector` and `same_y` then the same `y` value shall be appended
+                        // https://learn.microsoft.com/en-us/typography/opentype/spec/glyf
+                        // See: Y_IS_SAME_OR_POSITIVE_Y_SHORT_VECTOR
+                    }
+                }
+            }
+        }
+
+        var flags: u8 = GlyphFlags.none;
+        {
+            var i: usize = 0;
+            var flag_count: u8 = 0;
+            while (i < n) : (i += 1) {
+                if (flag_count == 0) {
+                    flags = glyph_flags[0];
+                    glyph_flags = glyph_flags + 1;
+                    if (isFlagSet(flags, GlyphFlags.repeat_flag)) {
+                        // If `repeat_flag` is set, the next flag is the number of times to repeat
+                        flag_count = glyph_flags[0];
+                        glyph_flags = glyph_flags + 1;
+                    }
+                } else {
+                    flag_count -= 1;
+                }
+                vertices[@intCast(usize, off) + @intCast(usize, i)].kind = flags;
+            }
+        }
+
+        {
+            var x: i16 = 0;
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                flags = vertices[@intCast(usize, off) + @intCast(usize, i)].kind;
+                if (isFlagSet(flags, GlyphFlags.x_short_vector)) {
+                    const dx: i16 = glyph_flags[0];
+                    glyph_flags += 1;
+                    x += if (isFlagSet(flags, GlyphFlags.positive_x_short_vector)) dx else -dx;
+                } else {
+                    if (!isFlagSet(flags, GlyphFlags.same_x)) {
+
+                        // The current x-coordinate is a signed 16-bit delta vector
+                        const abs_x = (@intCast(i16, glyph_flags[0]) << 8) + glyph_flags[1];
+
+                        x += abs_x;
+                        glyph_flags += 2;
+                    }
+                }
+                // If: `!x_short_vector` and `same_x` then the same `x` value shall be appended
+                vertices[off + i].x = x;
+            }
+        }
+
+        {
+            var y: i16 = 0;
+            var i: usize = 0;
+            while (i < n) : (i += 1) {
+                flags = vertices[off + i].kind;
+                if (isFlagSet(flags, GlyphFlags.y_short_vector)) {
+                    const dy: i16 = glyph_flags[0];
+                    glyph_flags += 1;
+                    y += if (isFlagSet(flags, GlyphFlags.positive_y_short_vector)) dy else -dy;
+                } else {
+                    if (!isFlagSet(flags, GlyphFlags.same_y)) {
+                        // The current y-coordinate is a signed 16-bit delta vector
+                        const abs_y = (@intCast(i16, glyph_flags[0]) << 8) + glyph_flags[1];
+                        y += abs_y;
+                        glyph_flags += 2;
+                    }
+                }
+                // If: `!y_short_vector` and `same_y` then the same `y` value shall be appended
+                vertices[off + i].y = y;
+            }
+        }
+        assert(vertices_count == 0);
+
+        var i: usize = 0;
+        var x: i16 = 0;
+        var y: i16 = 0;
+
+        var control1_x: i32 = 0;
+        var control1_y: i32 = 0;
+        var start_x: i32 = 0;
+        var start_y: i32 = 0;
+
+        var scx: i32 = 0; // start_control_point_x
+        var scy: i32 = 0; // start_control_point_y
+
+        var was_off: bool = false;
+        var first_point_off_curve: bool = false;
+
+        next_move = 0;
+        while (i < n) : (i += 1) {
+            const current_vertex = vertices[off + i];
+            if (next_move == i) { // End of contour
+                if (i != 0) {
+                    vertices_count = closeShape(vertices, vertices_count, was_off, first_point_off_curve, start_x, start_y, scx, scy, control1_x, control1_y);
+                }
+
+                first_point_off_curve = ((current_vertex.kind & GlyphFlags.on_curve_point) == 0);
+                if (first_point_off_curve) {
+                    scx = current_vertex.x;
+                    scy = current_vertex.y;
+                    if (!isFlagSet(vertices[off + i + 1].kind, GlyphFlags.on_curve_point)) {
+                        start_x = x + (vertices[off + i + 1].x >> 1);
+                        start_y = y + (vertices[off + i + 1].y >> 1);
+                    } else {
+                        start_x = current_vertex.x + (vertices[off + i + 1].x);
+                        start_y = current_vertex.y + (vertices[off + i + 1].y);
+                        i += 1;
+                    }
+                } else {
+                    start_x = current_vertex.x;
+                    start_y = current_vertex.y;
+                }
+                setVertex(&vertices[vertices_count], .move, start_x, start_y, 0, 0);
+                vertices_count += 1;
+                was_off = false;
+                next_move = 1 + readBigEndian(i16, @ptrToInt(end_points_of_contours) + (@intCast(usize, j) * 2));
+                j += 1;
+            } else {
+                // Continue current contour
+                if (0 == (current_vertex.kind & GlyphFlags.on_curve_point)) {
+                    if (was_off) {
+                        // Even though we've encountered 2 control points in a row, this is still a simple
+                        // quadradic bezier (I.e 1 control point, 2 real points)
+                        // We can calculate the real point that lies between them by taking the average
+                        // of the two control points (It's omitted because it's redundant information)
+                        // https://stackoverflow.com/questions/20733790/
+                        const average_x = @divFloor(control1_x + current_vertex.x, 2);
+                        const average_y = @divFloor(control1_y + current_vertex.y, 2);
+                        setVertex(&vertices[vertices_count], .curve, average_x, average_y, control1_x, control1_y);
+                        vertices_count += 1;
+                    }
+                    control1_x = current_vertex.x;
+                    control1_y = current_vertex.y;
+                    was_off = true;
+                } else {
+                    if (was_off) {
+                        setVertex(&vertices[vertices_count], .curve, current_vertex.x, current_vertex.y, control1_x, control1_y);
+                    } else {
+                        setVertex(&vertices[vertices_count], .line, current_vertex.x, current_vertex.y, 0, 0);
+                    }
+                    vertices_count += 1;
+                    was_off = false;
+                }
+            }
+        }
+        vertices_count = closeShape(vertices, vertices_count, was_off, first_point_off_curve, start_x, start_y, scx, scy, control1_x, control1_y);
+    } else if (contour_count_signed < 0) {
+        // Glyph is composite
+        return error.InvalidContourCount;
+    } else {
+        unreachable;
+    }
+
+    // printVertices(vertices[0..vertices_count]);
+    return allocator.shrink(vertices, vertices_count);
+}
 
 fn getGlyphShape(allocator: Allocator, info: FontInfo, glyph_index: i32) ![]Vertex {
     if (info.cff.size != 0) {
@@ -377,6 +669,12 @@ fn getGlyphShape(allocator: Allocator, info: FontInfo, glyph_index: i32) ![]Vert
 
     var vertices: []Vertex = undefined;
     var vertices_count: u32 = 0;
+
+    var min_x: i16 = undefined;
+    var min_y: i16 = undefined;
+    var max_x: i16 = undefined;
+    var max_y: i16 = undefined;
+    var glyph_dimensions: geometry.Dimensions2D(u32) = undefined;
 
     // Find the byte offset of the glyh table
     const glyph_offset = try getGlyfOffset(info, glyph_index);
@@ -1992,11 +2290,11 @@ fn rasterize2(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []V
 // I want to be able to sample a point on y or x axis, and then
 // some additionals in the middle if a curve
 
-const Contour = struct {
+const OutlineSegment = struct {
     from: Point(f64),
     to: Point(f64),
-    control_opt: ?Point(f64),
-    bounding_box: BoundingBox(f64),
+    control_opt: ?Point(f64) = null,
+    // bounding_box: BoundingBox(f64),
 
     pub fn sample(self: @This(), t: f64) Point(f64) {
         std.debug.assert(t <= 1.0);
@@ -2242,15 +2540,25 @@ test "interpolateBoundryPoint" {
     }
 }
 
+// const YIntersection = struct {
+//     outline_index: u32,
+//     outline_segment_index: u32,
+//     x: f64,
+// };
+
 const Outline = struct {
-    contours: []Contour,
+    outline_segments: []OutlineSegment,
 
     pub fn samplePoint(self: @This(), t: f64) Point(f64) {
         const t_floored: f64 = @floor(t);
-        const contour_index = @floatToInt(usize, t_floored);
-        std.debug.assert(contour_index < self.contours.len);
-        return self.contours[contour_index].sample(t - t_floored);
+        const outline_segment_index = @floatToInt(usize, t_floored);
+        std.debug.assert(outline_segment_index < self.outline_segment.len);
+        return self.outline_segment[outline_segment_index].sample(t - t_floored);
     }
+
+    // pub fn cacululateHorizontalLineIntersections(scanline_y: f64) IntersectionList {
+
+    // }
 
     // Sampled point on the line
     // Direction? (This can be calculated / guessed)
@@ -2259,23 +2567,23 @@ const Outline = struct {
 
     // }
 
-    // When a fill region is ended, the direction around the contour will be negative
+    // When a fill region is ended, the direction around the outline_segment will be negative
     pub fn sampleAtDistance(self: @This(), ideal: f64, threshold: f64, base_point: SampledPoint) SampledPoint {
         const t_floored: f64 = @floor(base_point.t);
-        const contour_index = @floatToInt(usize, t_floored);
+        const outline_segment_index = @floatToInt(usize, t_floored);
         var new_base = SampledPoint{
             .p = base_point.p,
             .t = base_point.t - t_floored,
             .t_increment = base_point.t_increment,
         };
-        if (self.contours[contour_index].sampleAtDistance(ideal, threshold, new_base)) |sample| {
+        if (self.outline_segment[outline_segment_index].sampleAtDistance(ideal, threshold, new_base)) |sample| {
             return sample;
         }
-        const next_contour_index = (contour_index + 1) % self.contours.len;
+        const next_outline_segment_index = (outline_segment_index + 1) % self.outline_segment.len;
         new_base.t = 0.0;
         // TODO: Is is possible though that distance will be large enough to skip a contour,
         //       or even loop around entirely
-        if (self.contours[next_contour_index].sampleAtDistance(ideal, threshold, new_base)) |sample| {
+        if (self.outline_segment[next_outline_segment_index].sampleAtDistance(ideal, threshold, new_base)) |sample| {
             return sample;
         }
         // This function cannot fail (Barring a bug in the code), as an outline is a closed loop
@@ -2336,7 +2644,7 @@ const SampledPoint = struct {
 // If you have previous intersections, you can use them to fill in middle (Have to check for concave curves though)
 //
 
-fn caclulateHorizontalLineIntersections(scanline_y: f64, vertices: []Vertex, scale: f32) !IntersectionList {
+fn cacululateHorizontalLineIntersections(scanline_y: f64, vertices: []Vertex, scale: f32) !IntersectionList {
     const printf = std.debug.print;
     var current_scanline = IntersectionList{ .buffer = undefined, .count = 0 };
     var vertex_i: u32 = 1;
@@ -2458,14 +2766,107 @@ fn caclulateHorizontalLineIntersections(scanline_y: f64, vertices: []Vertex, sca
     return current_scanline;
 }
 
+fn printOutlines(outlines: []Outline) void {
+    for (outlines) |outline, outline_i| {
+        const printf = std.debug.print;
+        printf("Outline #{d}\n", .{outline_i + 1});
+        for (outline.outline_segments) |outline_segment, outline_segment_i| {
+            const to = outline_segment.to;
+            const from = outline_segment.from;
+            printf("  {d:2} {d:.3}, {d:.3} -> {d:.3}, {d:.3}", .{ outline_segment_i, from.x, from.y, to.x, to.y });
+            if (outline_segment.control_opt) |control_point| {
+                printf(" w/ control {d:.3}, {d:.3}", .{ control_point.x, control_point.y });
+            }
+            printf("\n", .{});
+        }
+    }
+}
+
 // Would be better to do two scanlines at a time, upper and lower
 fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
-    std.log.info("Glyph bbox {d} x {d} -- {d} x {d}", .{
-        min_x,
-        min_y,
-        max_x,
-        max_y,
-    });
+    var outline_segment_lengths = [1]u32{0} ** 32;
+
+    std.log.info("vertices count: {d}", .{vertices.len});
+    printVertices(vertices, scale);
+
+    const outline_count: u32 = blk: {
+        var count: u32 = 0;
+        for (vertices) |vertex, vertex_i| {
+            if (vertex_i == 0) continue;
+            if (@intToEnum(VMove, vertex.kind) == .move) {
+                count += 1;
+                continue;
+            }
+            outline_segment_lengths[count] += 1;
+        }
+        break :blk count + 1;
+    };
+
+    std.log.info("Outline count: {d}", .{outline_count});
+
+    var outlines = try allocator.alloc(Outline, outline_count);
+    {
+        var i: u32 = 0;
+        while (i < outline_count) : (i += 1) {
+            std.log.info("Outline {d} = {d}", .{ i + 1, outline_segment_lengths[i] });
+            outlines[i].outline_segments = try allocator.alloc(OutlineSegment, outline_segment_lengths[i]);
+        }
+    }
+
+    {
+        // TODO:
+        std.debug.assert(@intToEnum(VMove, vertices[0].kind) == .move);
+        var vertex_index: u32 = 1;
+        var outline_index: u32 = 0;
+        var outline_segment_index: u32 = 0;
+        while (vertex_index < vertices.len) {
+            std.log.info("Vertex_index: {d}, outline_index: {d} outline_segment_index: {d}", .{ vertex_index, outline_index, outline_segment_index });
+            switch (@intToEnum(VMove, vertices[vertex_index].kind)) {
+                .move => {
+                    vertex_index += 1;
+                    outline_index += 1;
+                    outline_segment_index = 0;
+                },
+                .line => {
+                    const from = vertices[vertex_index - 1];
+                    const to = vertices[vertex_index];
+                    outlines[outline_index].outline_segments[outline_segment_index] = OutlineSegment{
+                        .from = Point(f64){
+                            .x = @intToFloat(f64, from.x) * scale,
+                            .y = @intToFloat(f64, from.y) * scale,
+                        },
+                        .to = Point(f64){
+                            .x = @intToFloat(f64, to.x) * scale,
+                            .y = @intToFloat(f64, to.y) * scale,
+                        },
+                    };
+                    vertex_index += 1;
+                    outline_segment_index += 1;
+                },
+                .curve => {
+                    const from = vertices[vertex_index - 1];
+                    const to = vertices[vertex_index];
+                    outlines[outline_index].outline_segments[outline_segment_index] = OutlineSegment{ .from = Point(f64){
+                        .x = @intToFloat(f64, from.x) * scale,
+                        .y = @intToFloat(f64, from.y) * scale,
+                    }, .to = Point(f64){
+                        .x = @intToFloat(f64, to.x) * scale,
+                        .y = @intToFloat(f64, to.y) * scale,
+                    }, .control_opt = Point(f64){
+                        .x = @intToFloat(f64, from.control1_x) * scale,
+                        .y = @intToFloat(f64, from.control1_y) * scale,
+                    } };
+                    vertex_index += 1;
+                    outline_segment_index += 1;
+                },
+                // TODO:
+                else => unreachable,
+            }
+        }
+    }
+
+    printOutlines(outlines);
+
     const bitmap_pixel_count = @intCast(usize, dimensions.width) * dimensions.height;
     var bitmap = Bitmap{
         .width = @intCast(u32, dimensions.width),
@@ -2486,7 +2887,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
     while (scanline_y_index >= 0) : (scanline_y_index -= 1) {
         const scanline_y = @intToFloat(f64, scanline_y_index);
         const image_y_index = (dimensions.height - 1) - @intCast(u32, scanline_y_index);
-        const current_scanline = try caclulateHorizontalLineIntersections(scanline_y, vertices, scale);
+        const current_scanline = try cacululateHorizontalLineIntersections(scanline_y, vertices, scale);
         if (current_scanline.count == 0) {
             std.log.warn("No intersections found", .{});
             continue;
