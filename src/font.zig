@@ -394,11 +394,6 @@ fn getGlyphShape2(allocator: Allocator, info: FontInfo, glyph_index: i32) ![]Out
     std.log.info("Glyph vertex range: min {d} x {d} max {d} x {d}", .{ min_x, min_y, max_x, max_y });
     std.log.info("Stripped dimensions {d} x {d}", .{ max_x - min_x, max_y - min_y });
 
-    // const glyph_dimensions = geometry.Dimensions2D(u32) {
-    //     .width = @intCast(u32, max_x - min_x + 1),
-    //     .height = @intCast(u32, max_y - min_y + 1)
-    // };
-
     if (contour_count_signed > 0) {
         const contour_count: u32 = @intCast(u16, contour_count_signed);
 
@@ -2296,6 +2291,14 @@ const OutlineSegment = struct {
     control_opt: ?Point(f64) = null,
     // bounding_box: BoundingBox(f64),
 
+    pub inline fn isCurve(self: @This()) bool {
+        return self.control_opt != null;
+    }
+
+    pub inline fn isLine(self: @This()) bool {
+        return self.control_opt == null;
+    }
+
     pub fn sample(self: @This(), t: f64) Point(f64) {
         std.debug.assert(t <= 1.0);
         std.debug.assert(t >= 0.0);
@@ -2352,17 +2355,6 @@ fn distanceBetweenPoints(point_a: Point(f64), point_b: Point(f64)) f64 {
     const sqrt = std.math.sqrt;
     return sqrt(pow(point_b.y - point_a.y, 2) + pow(point_a.x - point_b.x, 2));
 }
-
-const YIntersection = struct {
-    t: f64,
-    x: f64,
-    previous_x: f64 = -1.0,
-    previous_t: f64 = -1.0,
-    outline_index: u32,
-
-    // You can get the distance between both points and calculate a
-    // reasonable t_increment
-};
 
 const TessalatedRegion = struct {
     const AnchorPoint = struct {
@@ -2540,14 +2532,8 @@ test "interpolateBoundryPoint" {
     }
 }
 
-// const YIntersection = struct {
-//     outline_index: u32,
-//     outline_segment_index: u32,
-//     x: f64,
-// };
-
 const Outline = struct {
-    outline_segments: []OutlineSegment,
+    segments: []OutlineSegment,
 
     pub fn samplePoint(self: @This(), t: f64) Point(f64) {
         const t_floored: f64 = @floor(t);
@@ -2589,11 +2575,6 @@ const Outline = struct {
         // This function cannot fail (Barring a bug in the code), as an outline is a closed loop
         unreachable;
     }
-};
-
-const YIntersectionPair = struct {
-    start: YIntersection,
-    end: YIntersection,
 };
 
 const Shape = struct {
@@ -2643,6 +2624,126 @@ const SampledPoint = struct {
 // If it's the first intersection, then there won't be a fr
 // If you have previous intersections, you can use them to fill in middle (Have to check for concave curves though)
 //
+
+// Function that takes two IntersectionList (upper and lower scanline) and returns a fillRegion structure
+
+const YIntersection = struct {
+    outline_index: u32,
+    outline_segment_index: u32,
+    x_intersect: f64,
+    t: f64, // t value (sample) of outline
+};
+
+const YIntersectionPair = struct {
+    start: YIntersection,
+    end: YIntersection,
+};
+
+const YIntersectionList = struct {
+    buffer: [64]YIntersection,
+    len: u64,
+
+    pub fn add(self: *@This(), intersection: YIntersection, label: []const u8) !void {
+        _ = label;
+        std.debug.assert(intersection.x_intersect >= 0);
+        if (self.count == (self.buffer.len - 1)) {
+            return error.BufferFull;
+        }
+        self.buffer[self.count] = intersection;
+        self.count += 1;
+    }
+
+    pub fn bufferSlice(self: @This()) []Intersection {
+        return self.buffer[0..self.count];
+    }
+};
+
+fn cacululateHorizontalLineIntersections2(scanline_y: f64, outlines: []Outline) !YIntersectionList {
+    const printf = std.debug.print;
+    for (outlines) |outline, outline_i| {
+        for (outlines.segments) |segment, segment_i| {
+            const point_a = segment.from;
+            const point_b = segment.to;
+            if (segment.isCurve()) {
+                const control_point = segment.control_opt.?;
+                printf("  Vertex (curve) A({d:.2}, {d:.2}) --> B({d:.2}, {d:.2}) C ({d:.2}, {d:.2}) -- ", .{
+                    point_b.x,
+                    point_b.y,
+                    point_a.x,
+                    point_a.y,
+                    control_point.x,
+                    control_point.y,
+                });
+                const bezier = BezierQuadratic{ .a = point_a, .b = point_b, .control = control_point };
+                const inflection_y = quadradicBezierInflectionPoint(bezier).y;
+                const is_middle_higher = (inflection_y > max_y) and scanline_y > inflection_y;
+                const is_middle_lower = (inflection_y < min_y) and scanline_y < inflection_y;
+                if (is_middle_higher or is_middle_lower) {
+                    printf("REJECT - Outsize Y range\n", .{});
+                    continue;
+                }
+                const optional_intersection_points = quadraticBezierPlaneIntersections(bezier, scanline_y);
+                if (optional_intersection_points[0]) |first_intersection| {
+                    try current_scanline.add(.{
+                        .x_intersect = first_intersection.x,
+                        .t = first_intersection.t,
+                        .outline_index = outline_i,
+                        .segment_index = segment_i,
+                    }, "curve 1");
+                    if (optional_intersection_points[1]) |second_intersection| {
+                        const x_diff_threshold = 0.001;
+                        if (@fabs(second_intersection.x - first_intersection.x) > x_diff_threshold) {
+                            try current_scanline.add(.{
+                                .x_intersect = second_intersection.x,
+                                .t = second_intersection.t,
+                                .outline_index = outline_i,
+                                .segment_index = segment_i,
+                            }, "curve 2");
+                        }
+                    }
+                } else if (optional_intersection_points[1]) |second_intersection| {
+                    try current_scanline.add(.{
+                        .x_intersect = second_intersection.x,
+                        .t = second_intersection.t,
+                        .outline_index = outline_i,
+                        .segment_index = segment_i,
+                    }, "curve 2 only");
+                }
+                continue;
+            }
+            //
+            // Outline segment is a line
+            //
+            printf("  Vertex (line) {d:^5.2} x {d:^5.2} --> {d:^5.2} x {d:^5.2} -- ", .{ point_a.x, point_a.y, point_b.x, point_b.y });
+            const max_y = @maximum(point_a.y, point_b.y);
+            const min_y = @minimum(point_a.y, point_b.y);
+            std.debug.assert(max_y >= min_y);
+            if (scanline_y > max_y or scanline_y < min_y) {
+                printf("REJECT - Outsize Y range\n", .{});
+                continue;
+            }
+
+            if (point_a.x == point_b.x) {
+                try current_scanline.add(.{
+                    .x_intersect = point_a.x,
+                    .t = -1.0,
+                    .outline_index = outline_i,
+                    .segment_index = segment_i,
+                }, "vertical");
+            } else {
+                try current_scanline.add(
+                    .{
+                        .x_intersect = horizontalPlaneIntersection(scanline_y, point_a, point_b),
+                        .t = -1.0,
+                        .outline_index = outline_i,
+                        .segment_index = segment_i,
+                    },
+                    "line",
+                );
+            }
+        }
+    }
+}
 
 fn cacululateHorizontalLineIntersections(scanline_y: f64, vertices: []Vertex, scale: f32) !IntersectionList {
     const printf = std.debug.print;
@@ -2770,7 +2871,7 @@ fn printOutlines(outlines: []Outline) void {
     for (outlines) |outline, outline_i| {
         const printf = std.debug.print;
         printf("Outline #{d}\n", .{outline_i + 1});
-        for (outline.outline_segments) |outline_segment, outline_segment_i| {
+        for (outline.segments) |outline_segment, outline_segment_i| {
             const to = outline_segment.to;
             const from = outline_segment.from;
             printf("  {d:2} {d:.3}, {d:.3} -> {d:.3}, {d:.3}", .{ outline_segment_i, from.x, from.y, to.x, to.y });
@@ -2809,7 +2910,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
         var i: u32 = 0;
         while (i < outline_count) : (i += 1) {
             std.log.info("Outline {d} = {d}", .{ i + 1, outline_segment_lengths[i] });
-            outlines[i].outline_segments = try allocator.alloc(OutlineSegment, outline_segment_lengths[i]);
+            outlines[i].segments = try allocator.alloc(OutlineSegment, outline_segment_lengths[i]);
         }
     }
 
@@ -2830,7 +2931,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                 .line => {
                     const from = vertices[vertex_index - 1];
                     const to = vertices[vertex_index];
-                    outlines[outline_index].outline_segments[outline_segment_index] = OutlineSegment{
+                    outlines[outline_index].segments[outline_segment_index] = OutlineSegment{
                         .from = Point(f64){
                             .x = @intToFloat(f64, from.x) * scale,
                             .y = @intToFloat(f64, from.y) * scale,
@@ -2846,7 +2947,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                 .curve => {
                     const from = vertices[vertex_index - 1];
                     const to = vertices[vertex_index];
-                    outlines[outline_index].outline_segments[outline_segment_index] = OutlineSegment{ .from = Point(f64){
+                    outlines[outline_index].segments[outline_segment_index] = OutlineSegment{ .from = Point(f64){
                         .x = @intToFloat(f64, from.x) * scale,
                         .y = @intToFloat(f64, from.y) * scale,
                     }, .to = Point(f64){
@@ -2877,11 +2978,6 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
     std.mem.set(graphics.RGBA(f32), bitmap.pixels, null_pixel);
 
     std.log.info("Rasterizing image of dimensions: {d} x {d}", .{ bitmap.width, bitmap.height });
-    printVertices(vertices, scale);
-
-    for (vertices) |*vertex| {
-        vertex.is_active = 0;
-    }
 
     var scanline_y_index: i32 = @intCast(i32, dimensions.height) - 1;
     while (scanline_y_index >= 0) : (scanline_y_index -= 1) {
