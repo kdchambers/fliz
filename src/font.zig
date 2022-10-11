@@ -17,21 +17,8 @@ const graphics = @import("graphics.zig");
 const Scale2D = geometry.Scale2D;
 const Shift2D = geometry.Shift2D;
 
-// Algorithm
-// Convert vertices to outlines (That I can use a connected t)
-// Calculate intersection points for upper and lower scanline
-// Connect upper and lower intersections
-// - Based on nearest t value
-// - Has to be from upper to lower scanline
-// Calculate the fill zone using rightmost entry, and leftmost exit
-// For each pixel in AA zone, calculate entry and exit points (Based on line)
-// Calculate fill anchor for each pixel, first corner going anti-clockwise from bottom scanline
-// - Reverse if end of shape
-// - If there's no corner, take whatever middle point between entry and exit
-
-// Issue: One fill anchor point isn't enough if there is a large curve
-
 fn rasterize3(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
+    printVertices(vertices, scale);
     var outline_segment_lengths = [1]u32{0} ** 32;
     const outline_count: u32 = blk: {
         var count: u32 = 0;
@@ -46,12 +33,10 @@ fn rasterize3(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []V
         break :blk count + 1;
     };
 
-    std.log.info("Outline count: {d}", .{outline_count});
     var outlines = try allocator.alloc(Outline, outline_count);
     {
         var i: u32 = 0;
         while (i < outline_count) : (i += 1) {
-            std.log.info("Outline {d} = {d}", .{ i + 1, outline_segment_lengths[i] });
             outlines[i].segments = try allocator.alloc(OutlineSegment, outline_segment_lengths[i]);
         }
     }
@@ -62,8 +47,9 @@ fn rasterize3(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []V
         var vertex_index: u32 = 1;
         var outline_index: u32 = 0;
         var outline_segment_index: u32 = 0;
+        const height = @intToFloat(f64, dimensions.height);
+        _ = height;
         while (vertex_index < vertices.len) {
-            std.log.info("Vertex_index: {d}, outline_index: {d} outline_segment_index: {d}", .{ vertex_index, outline_index, outline_segment_index });
             switch (@intToEnum(VMove, vertices[vertex_index].kind)) {
                 .move => {
                     vertex_index += 1;
@@ -76,11 +62,13 @@ fn rasterize3(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []V
                     outlines[outline_index].segments[outline_segment_index] = OutlineSegment{
                         .from = Point(f64){
                             .x = @intToFloat(f64, from.x) * scale,
-                            .y = @intToFloat(f64, from.y) * scale,
+                            .y = (@intToFloat(f64, from.y) * scale),
+                            // .y = height - (@intToFloat(f64, from.y) * scale),
                         },
                         .to = Point(f64){
                             .x = @intToFloat(f64, to.x) * scale,
-                            .y = @intToFloat(f64, to.y) * scale,
+                            .y = (@intToFloat(f64, to.y) * scale),
+                            // .y = height - (@intToFloat(f64, to.y) * scale),
                         },
                     };
                     vertex_index += 1;
@@ -89,16 +77,23 @@ fn rasterize3(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []V
                 .curve => {
                     const from = vertices[vertex_index - 1];
                     const to = vertices[vertex_index];
-                    outlines[outline_index].segments[outline_segment_index] = OutlineSegment{ .from = Point(f64){
-                        .x = @intToFloat(f64, from.x) * scale,
-                        .y = @intToFloat(f64, from.y) * scale,
-                    }, .to = Point(f64){
-                        .x = @intToFloat(f64, to.x) * scale,
-                        .y = @intToFloat(f64, to.y) * scale,
-                    }, .control_opt = Point(f64){
-                        .x = @intToFloat(f64, from.control1_x) * scale,
-                        .y = @intToFloat(f64, from.control1_y) * scale,
-                    } };
+                    outlines[outline_index].segments[outline_segment_index] = OutlineSegment{
+                        .from = Point(f64){
+                            .x = @intToFloat(f64, from.x) * scale,
+                            // .y = height - (@intToFloat(f64, from.y) * scale),
+                            .y = (@intToFloat(f64, from.y) * scale),
+                        },
+                        .to = Point(f64){
+                            .x = @intToFloat(f64, to.x) * scale,
+                            // .y = height - (@intToFloat(f64, to.y) * scale),
+                            .y = (@intToFloat(f64, to.y) * scale),
+                        },
+                        .control_opt = Point(f64){
+                            .x = @intToFloat(f64, to.control1_x) * scale,
+                            // .y = height - (@intToFloat(f64, from.control1_y) * scale),
+                            .y = (@intToFloat(f64, to.control1_y) * scale),
+                        },
+                    };
                     vertex_index += 1;
                     outline_segment_index += 1;
                 },
@@ -123,10 +118,36 @@ fn rasterize3(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []V
     var intersections_lower = try cacululateHorizontalLineIntersections2(0, outlines);
     while (scanline_upper < bitmap.height) : (scanline_upper += 1) {
         var intersections_upper = try cacululateHorizontalLineIntersections2(@intToFloat(f64, scanline_upper), outlines);
+        intersections_upper.print();
         if (intersections_lower.len > 0 or intersections_upper.len > 0) {
             const connected_intersections = try combineIntersectionLists(&intersections_upper, &intersections_lower);
-            _ = connected_intersections;
-            // Rasterize the line
+            for (connected_intersections.buffer[0..connected_intersections.len]) |intersect_pair| {
+                const upper_opt = intersect_pair.upper;
+                const lower_opt = intersect_pair.lower;
+                const start_x = blk: {
+                    if (lower_opt) |lower| {
+                        break :blk lower.start.x_intersect;
+                    }
+                    if (upper_opt) |upper| {
+                        break :blk upper.start.x_intersect;
+                    }
+                    unreachable;
+                };
+                const end_x = blk: {
+                    if (lower_opt) |lower| {
+                        break :blk lower.end.x_intersect;
+                    }
+                    if (upper_opt) |upper| {
+                        break :blk upper.end.x_intersect;
+                    }
+                    unreachable;
+                };
+                std.debug.assert(start_x <= end_x);
+                var current_x = @floatToInt(usize, @floor(start_x));
+                while (current_x <= @floatToInt(usize, @floor(end_x))) : (current_x += 1) {
+                    bitmap.pixels[current_x + (scanline_upper * dimensions.width)] = graphics.RGBA(f32).fromInt(u8, 255, 255, 255, 255);
+                }
+            }
         }
         intersections_lower = intersections_upper;
     }
@@ -197,8 +218,8 @@ const YIntersection = struct {
     x_intersect: f32,
     t: f64, // t value (sample) of outline
 
-    pub fn print() void {
-        std.debug.printf("(t {d} | x {d} | o {d})", .{ self.t, self.x_intersect, self.outline_index });
+    pub fn print(self: @This()) void {
+        std.debug.print("(t {d:.4} | x {d:.4} | o {d})", .{ self.t, self.x_intersect, self.outline_index });
     }
 };
 
@@ -206,11 +227,15 @@ const YIntersectionPair = struct {
     start: YIntersection,
     end: YIntersection,
 
-    pub fn print(comptime indent_level: comptime_int, comptime newline: bool) void {
+    pub fn print(self: @This(), comptime indent_level: comptime_int, comptime newline: bool) void {
         const indent = "  " ** indent_level;
-        std.debug.printf("Start ", .{});
+        std.debug.print("{s}Start ", .{indent});
+        self.start.print();
+        std.debug.print("\n", .{});
+        std.debug.print("{s}End ", .{indent});
+        self.end.print();
         if (newline) {
-            std.debug.printf("\n");
+            std.debug.print("\n", .{});
         }
     }
 };
@@ -219,6 +244,13 @@ const YIntersectionPairList = struct {
     const capacity = 32;
     buffer: [capacity]YIntersectionPair,
     len: u64,
+
+    pub fn print(self: @This()) void {
+        std.debug.print("Pair list\n", .{});
+        for (self.buffer[0..self.len]) |pair| {
+            pair.print(1, true);
+        }
+    }
 
     pub fn add(self: *@This(), intersection: YIntersectionPair) !void {
         if (self.len == capacity) {
@@ -237,6 +269,13 @@ const YIntersectionList = struct {
     const capacity = 32;
     buffer: [capacity]YIntersection,
     len: u64,
+
+    pub fn print(self: @This()) void {
+        std.debug.print("Intersection list\n", .{});
+        for (self.buffer[0..self.len]) |pair| {
+            pair.print(1, true);
+        }
+    }
 
     pub fn add(self: *@This(), intersection: YIntersection) !void {
         std.debug.assert(intersection.x_intersect >= 0);
@@ -320,16 +359,8 @@ const Scanline = struct {
 };
 
 fn combineIntersectionLists(upper_list: *YIntersectionPairList, lower_list: *YIntersectionPairList) !IntersectionConnectionList {
-    var connection_list = IntersectionConnectionList{ .buffer = undefined, .len = 0 };
     std.log.info("Combining intersection lists. Upper {d}, Lower {d}", .{ upper_list.len, lower_list.len });
-
-    for (upper_list.buffer[0..upper_list.len]) |upper, upper_i| {
-        std.log.info("Upper {d} start_t {d} end_t {d}", .{ upper_i, upper.start.t, upper.end.t });
-    }
-    for (lower_list.buffer[0..lower_list.len]) |lower, lower_i| {
-        std.log.info("Lower {d} start_t {d} end_t {d}", .{ lower_i, lower.start.t, lower.end.t });
-    }
-
+    var connection_list = IntersectionConnectionList{ .buffer = undefined, .len = 0 };
     if (upper_list.len > lower_list.len) {
         for (upper_list.buffer[0..upper_list.len]) |upper| {
             try connection_list.add(.{ .upper = upper, .lower = null });
@@ -337,9 +368,10 @@ fn combineIntersectionLists(upper_list: *YIntersectionPairList, lower_list: *YIn
         for (lower_list.buffer[0..lower_list.len]) |lower| {
             var t_closest: f64 = std.math.floatMax(f64);
             var index_closest: i32 = -1;
+            var matched = [1]bool{false} ** 64;
             for (upper_list.buffer[0..upper_list.len]) |upper, upper_i| {
+                if (matched[upper_i]) continue;
                 const t_diff: f64 = @fabs(upper.start.t - lower.start.t) + @fabs(upper.end.t - lower.end.t);
-                std.log.info("T diff {d}", .{t_diff});
                 std.debug.assert(t_diff > 0);
                 if (t_diff < t_closest) {
                     t_closest = t_diff;
@@ -347,20 +379,20 @@ fn combineIntersectionLists(upper_list: *YIntersectionPairList, lower_list: *YIn
                 }
             }
             std.debug.assert(index_closest >= 0);
-            std.log.info("Selected T diff {d}", .{t_closest});
-            upper_list.buffer[@intCast(usize, index_closest)].start.t = std.math.floatMax(f64);
+            matched[@intCast(usize, index_closest)] = true;
             connection_list.buffer[@intCast(usize, index_closest)].lower = lower;
         }
     } else {
         for (lower_list.buffer[0..lower_list.len]) |lower| {
             try connection_list.add(.{ .upper = null, .lower = lower });
         }
+        var matched = [1]bool{false} ** 64;
         for (upper_list.buffer[0..upper_list.len]) |upper| {
             var t_closest: f64 = std.math.floatMax(f64);
             var index_closest: i32 = -1;
             for (lower_list.buffer[0..lower_list.len]) |lower, lower_i| {
+                if (matched[lower_i]) continue;
                 const t_diff: f64 = @fabs(upper.start.t - lower.start.t) + @fabs(upper.end.t - lower.end.t);
-                std.log.info("T diff {d}", .{t_diff});
                 std.debug.assert(t_diff > 0);
                 if (t_diff < t_closest) {
                     t_closest = t_diff;
@@ -368,57 +400,17 @@ fn combineIntersectionLists(upper_list: *YIntersectionPairList, lower_list: *YIn
                 }
             }
             std.debug.assert(index_closest >= 0);
-            std.log.info("Selected T diff {d}", .{t_closest});
-            lower_list.buffer[@intCast(usize, index_closest)].start.t = std.math.floatMax(f64);
+            matched[@intCast(usize, index_closest)] = true;
             connection_list.buffer[@intCast(usize, index_closest)].upper = upper;
         }
     }
-
-    // std.debug.assert(upper_list.len == lower_list.len);
-
-    // Given an upper and lower scanline, with u and l elements respectively
-    // Write a function that returns all valid connections
-    // var connection_list = IntersectionConnectionList{ .buffer = undefined, .len = 0 };
-
-    // if(upper_list.len == 0) return connection_list;
-    // if(lower_list.len == 0) return connection_list;
-
-    // for(upper_list.buffer) |upper, upper_i| {
-    //     std.log.info("Matching upper", .{});
-    //     const upper_start = upper.start;
-    //     const upper_end = upper.end;
-    //     var t_closest: f64 = std.math.floatMax(f64);
-
-    //     var index_closest: i32 = -1;
-    //     for(lower_list.buffer) |lower, lower_i| {
-    //         const lower_start = lower.start;
-    //         const lower_end = lower.end;
-    //         const t_diff: f64 = @fabs(upper_start.t - lower_start.t) + @fabs(upper_end.t - lower_end.t);
-    //         std.log.info("T diff {d}", .{t_diff});
-    //         std.debug.assert(t_diff > 0);
-    //         if(t_diff < t_closest) {
-    //             t_closest = t_diff;
-    //             index_closest = @intCast(i32, lower_i);
-    //         }
-    //     }
-    //     std.debug.assert(index_closest >= 0);
-    //     std.log.info("Selected T diff {d}", .{t_closest});
-    //     try connection_list.add(.{ .upper = upper, .lower = lower_list.buffer[@intCast(usize, index_closest)] });
-    // }
-    // TODO: Check to make sure all connections make use of unique intersections
     return connection_list;
 }
 
-// inline fn lineInterpT(start: Point(f64), end: Point(f64), on_line: Point(f64)) f64 {
-
-// }
-
-// start, end for both scanlines
-// connect starts and ends
 fn cacululateHorizontalLineIntersections2(scanline_y: f64, outlines: []Outline) !YIntersectionPairList {
     var intersection_list = YIntersectionList{ .len = 0, .buffer = undefined };
     const printf = std.debug.print;
-    std.log.info("Outlines: {d}", .{outlines.len});
+    // std.log.info("Outlines: {d}", .{outlines.len});
     std.log.info("Calculating intersections for scanline {d}", .{scanline_y});
     for (outlines) |outline, outline_i| {
         // TODO: Remove
@@ -490,9 +482,13 @@ fn cacululateHorizontalLineIntersections2(scanline_y: f64, outlines: []Outline) 
                 continue;
             }
 
+            // TODO: Add comment. Another varient of lerp func
+            // a - (b - a) * t = p`
+            // p - a = (b - a) * t
+            // (p - a) / (b - a) = t
+            const interp_t = (scanline_y - point_a.y) / (point_b.y - point_a.y);
+            std.debug.assert(interp_t >= 0.0 and interp_t <= 1.0);
             if (point_a.x == point_b.x) {
-                const interp_t = (point_a.y - point_b.y) / scanline_y;
-                std.debug.assert(interp_t >= 0.0 and interp_t <= 1.0);
                 try intersection_list.add(.{
                     .outline_index = @intCast(u32, outline_i),
                     .x_intersect = @floatCast(f32, point_a.x),
@@ -501,8 +497,6 @@ fn cacululateHorizontalLineIntersections2(scanline_y: f64, outlines: []Outline) 
                 printf("Vertical line\n", .{});
             } else {
                 const x_intersect = @floatCast(f32, horizontalPlaneIntersection(scanline_y, point_a, point_b));
-                const interp_t = (point_a.x - point_b.x) / x_intersect;
-                std.debug.assert(interp_t >= 0.0 and interp_t <= 1.0);
                 try intersection_list.add(.{
                     .outline_index = @intCast(u32, outline_i),
                     .x_intersect = x_intersect,
@@ -549,8 +543,8 @@ fn cacululateHorizontalLineIntersections2(scanline_y: f64, outlines: []Outline) 
         while (i < intersection_list.len) : (i += 2) {
             const current = intersection_list.buffer[i];
             const next = intersection_list.buffer[i + 1];
-            std.log.info("Current: t {d}", .{current.t});
-            std.log.info("Next: t {d}", .{next.t});
+            // std.log.info("Current: t {d}", .{current.t});
+            // std.log.info("Next: t {d}", .{next.t});
             std.debug.assert(current.x_intersect <= next.x_intersect);
             const pair = YIntersectionPair{ .start = current, .end = next };
             try paired_list.add(pair);
@@ -564,13 +558,13 @@ fn cacululateHorizontalLineIntersections2(scanline_y: f64, outlines: []Outline) 
     for (paired_list.buffer[0..paired_list.len]) |pair, pair_i| {
         _ = pair;
         // NOTE: Bug in compiler requires that I index directly into buffer
-        printf("{d} Start: t {d} outline {d} End: t {d} outline {d}\n", .{
-            pair_i,
-            paired_list.buffer[pair_i].start.t,
-            paired_list.buffer[pair_i].start.outline_index,
-            paired_list.buffer[pair_i].end.t,
-            paired_list.buffer[pair_i].end.outline_index,
-        });
+        // printf("{d} Start: t {d} outline {d} End: t {d} outline {d}\n", .{
+        //     pair_i,
+        //     paired_list.buffer[pair_i].start.t,
+        //     paired_list.buffer[pair_i].start.outline_index,
+        //     paired_list.buffer[pair_i].end.t,
+        //     paired_list.buffer[pair_i].end.outline_index,
+        // });
         std.debug.assert(paired_list.buffer[pair_i].start.outline_index >= 0);
         std.debug.assert(paired_list.buffer[pair_i].start.outline_index < outlines.len);
         std.debug.assert(paired_list.buffer[pair_i].end.outline_index >= 0);
@@ -581,6 +575,8 @@ fn cacululateHorizontalLineIntersections2(scanline_y: f64, outlines: []Outline) 
         std.debug.assert(paired_list.buffer[pair_i].end.t >= 0.0);
         std.debug.assert(paired_list.buffer[pair_i].end.t < max_t);
     }
+
+    // std.debug.assert(paired_list.len <= 2);
 
     return paired_list;
 }
