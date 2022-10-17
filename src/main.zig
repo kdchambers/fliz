@@ -726,7 +726,7 @@ fn setup(allocator: std.mem.Allocator, app: *GraphicsContext) !void {
 
     const generate_glyph_atlas_start = std.time.nanoTimestamp();
 
-    const font_texture_chars = "J";
+    const font_texture_chars = "L";
     glyphs = try createGlyphSet(allocator, asset_path_font, font_texture_chars[0..], texture_layer_dimensions);
 
     const generate_glyph_atlas_end = std.time.nanoTimestamp();
