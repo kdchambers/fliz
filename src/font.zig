@@ -10,16 +10,23 @@ const toNative = std.mem.toNative;
 const bigToNative = std.mem.bigToNative;
 const eql = std.mem.eql;
 const assert = std.debug.assert;
-const print = std.debug.print;
 
 const geometry = @import("geometry.zig");
 const graphics = @import("graphics.zig");
 const Scale2D = geometry.Scale2D;
 const Shift2D = geometry.Shift2D;
 
-const float_accuracy_threshold: f64 = 0.00001;
+const util = struct {
+    pub fn print(text: []const u8) void {
+        var stdout = std.io.getStdErr().writer();
+        _ = stdout.write(text) catch return;
+    }
+};
+
+const print = util.print;
 
 inline fn floatCompare(first: f64, second: f64) bool {
+    const float_accuracy_threshold: f64 = 0.00001;
     if (first < (second + float_accuracy_threshold) and first > (second - float_accuracy_threshold))
         return true;
     return false;
@@ -46,15 +53,6 @@ test "calculatePercentage" {
     try std.testing.expect(calcPercentage(2.0, 4.0, 2.0) == 0.0);
     try std.testing.expect(calcPercentage(2.0, 244.0, 244.0) == 1.0);
     try std.testing.expect(calcPercentage(1.0, 11.0, 3.5) == 0.25);
-}
-
-fn closestIndex(start: usize, end: usize, max: usize) usize {
-    if (start < end) return 1;
-    const forward_length = end + (max - start);
-    const backward_length = end - start;
-    if (forward_length > backward_length)
-        return 1;
-    return 0;
 }
 
 fn rasterize3(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
@@ -153,16 +151,20 @@ fn rasterize3(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []V
     };
     const null_pixel = graphics.RGBA(f32){ .r = 0.0, .g = 0.0, .b = 0.0, .a = 0.0 };
     std.mem.set(graphics.RGBA(f32), bitmap.pixels, null_pixel);
+    // TODO:
+    const sample_t_max = @intToFloat(f64, outlines[0].segments.len);
 
     var scanline_lower: usize = 1;
-    var intersections_upper = try calculateHorizontalLineIntersections2(0, outlines);
+    var intersections_upper = try calculateHorizontalLineIntersections3(0, outlines);
     while (scanline_lower < bitmap.height) : (scanline_lower += 1) {
         // while (scanline_lower < 12) : (scanline_lower += 1) {
         const scanline_upper = scanline_lower - 1;
         const base_index = scanline_upper * dimensions.width;
-        var intersections_lower = try calculateHorizontalLineIntersections2(@intToFloat(f64, scanline_lower), outlines);
+        var intersections_lower = try calculateHorizontalLineIntersections3(@intToFloat(f64, scanline_lower), outlines);
         if (intersections_lower.len > 0 or intersections_upper.len > 0) {
-            const connected_intersections = try combineIntersectionLists(intersections_upper, intersections_lower);
+            const uppers = intersections_upper.buffer[0..intersections_upper.len];
+            const lowers = intersections_lower.buffer[0..intersections_lower.len];
+            const connected_intersections = try combineIntersectionLists3(uppers, lowers, @intToFloat(f64, scanline_upper), outlines);
             const samples_per_pixel = 3;
             for (connected_intersections.buffer[0..connected_intersections.len]) |intersect_pair| {
                 const invert_coverage = intersect_pair.flags.invert_coverage;
@@ -294,7 +296,7 @@ fn rasterize3(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []V
                         .y = if (is_upper) 1.0 else 0.0,
                     };
                     const samples_to_take: usize = pixel_count * samples_per_pixel;
-                    const sample_t_max = @intToFloat(f64, outline.segments.len);
+                    // const sample_t_max = @intToFloat(f64, outline.segments.len);
                     const sample_t_start = pair.start.t;
                     const sample_t_end = pair.end.t;
                     var sample_t_length: f64 = undefined;
@@ -513,8 +515,13 @@ const YIntersection = struct {
     x_intersect: f64,
     t: f64, // t value (sample) of outline
 
-    pub fn print(self: @This()) void {
-        std.debug.print("(t {d:.4} | x {d:.4} | o {d})", .{ self.t, self.x_intersect, self.outline_index });
+    pub fn print(self: @This(), comptime indent_level: comptime_int, comptime newline: bool, index: usize) void {
+        const printf = std.debug.print;
+        const indent = "  " ** indent_level;
+        printf("{s}{d:.2}. t {d:.4}  x_intersect {d:.4}", .{ indent, index, self.t, self.x_intersect });
+        if (newline) {
+            std.debug.print("\n", .{});
+        }
     }
 };
 
@@ -594,6 +601,35 @@ const IntersectionConnection = struct {
     lower: ?YIntersectionPair,
     upper: ?YIntersectionPair,
     flags: Flags = .{},
+
+    pub fn print(self: @This(), index: usize, comptime indent_level: comptime_int) void {
+        const indent = "  " ** indent_level;
+        const printf = std.debug.print;
+        if (self.upper) |upper| {
+            printf("{s}{d:.2}. upper t {d} ({d}) ==> t {d} ({d})\n", .{
+                indent,
+                index,
+                upper.start.t,
+                upper.start.x_intersect,
+                upper.end.t,
+                upper.end.x_intersect,
+            });
+        } else {
+            printf("{s}{d:.2}. upper: null\n", .{ indent, index });
+        }
+        if (self.lower) |lower| {
+            printf("{s}{d:.2}. lower t {d} ({d}) ==> t {d} ({d})\n", .{
+                indent,
+                index,
+                lower.start.t,
+                lower.start.x_intersect,
+                lower.end.t,
+                lower.end.x_intersect,
+            });
+        } else {
+            printf("{s}{d:.2}. lower: null\n", .{ indent, index });
+        }
+    }
 };
 
 const IntersectionConnectionList = struct {
@@ -601,6 +637,13 @@ const IntersectionConnectionList = struct {
 
     buffer: [capacity]IntersectionConnection,
     len: u32,
+
+    pub fn print(self: @This()) void {
+        std.debug.print("** Intersection Connection List **\n", .{});
+        for (self.buffer[0..self.len]) |connection, i| {
+            connection.print(i, 1);
+        }
+    }
 
     pub fn toSlice(self: @This()) []IntersectionConnection {
         return self.buffer[0..self.len];
@@ -615,7 +658,456 @@ const IntersectionConnectionList = struct {
     }
 };
 
-fn combineIntersectionLists2(upper_list: YIntersectionList, lower_list: YIntersectionList, t_max: f64) !IntersectionConnectionList {
+inline fn minTDistance(a: f64, b: f64, max: f64) f64 {
+    const positive = (a <= b);
+    const dist_forward = if (positive) b - a else b + (max - a);
+    const dist_reverse = if (positive) max - dist_forward else a - b;
+    const dist_min = @minimum(dist_forward, dist_reverse);
+    return dist_min;
+}
+
+test "minTDistance" {
+    const expect = std.testing.expect;
+    try expect(minTDistance(0.2, 0.4, 1.0) == 0.2);
+    try expect(minTDistance(1.0, 1.0, 1.0) == 0.0);
+    try expect(minTDistance(0.6, 0.2, 0.7) == 0.3);
+    try expect(minTDistance(0.65, 0.25, 0.75) == 0.35);
+}
+
+inline fn minTMiddle(a: f64, b: f64, max: f64) f64 {
+    const positive = (a <= b);
+    const dist_forward = if (positive) b - a else b + (max - a);
+    const dist_reverse = if (positive) max - dist_forward else a - b;
+    if (dist_forward < dist_reverse) {
+        return @mod(a + (dist_forward / 2.0), max);
+    }
+    var middle = b + (dist_reverse / 2.0);
+    return if (middle >= 0.0) middle else middle + max;
+}
+
+test "minTMiddle" {
+    const expect = std.testing.expect;
+    try expect(minTMiddle(0.2, 0.5, 1.0) == 0.35);
+    try expect(minTMiddle(0.5, 0.4, 1.0) == 0.45);
+    try expect(minTMiddle(0.8, 0.2, 1.0) == 0.0);
+}
+
+const IntersectionList = struct {
+    const capacity = 64;
+
+    upper_index_start: u32,
+    lower_index_start: u32,
+    upper_count: u32,
+    lower_count: u32,
+    increment: i32,
+    buffer: [capacity]YIntersection,
+
+    fn print(self: @This()) void {
+        {
+            util.print("Upper:\n");
+            var i: usize = 0;
+            while (i < self.upper_count) : (i += 1) {
+                const index = i + self.upper_index_start;
+                self.buffer[index].print(1, true, i);
+            }
+        }
+        {
+            util.print("Lower:\n");
+            var i: usize = 0;
+            while (i < self.lower_count) : (i += 1) {
+                const index = i + self.lower_index_start;
+                self.buffer[index].print(1, true, i);
+            }
+        }
+    }
+
+    fn makeFromSeperateScanlines(uppers: []const YIntersection, lowers: []const YIntersection) IntersectionList {
+        std.debug.assert(uppers.len + lowers.len <= IntersectionList.capacity);
+        var result = IntersectionList{
+            .upper_index_start = 0,
+            .lower_index_start = @intCast(u32, uppers.len),
+            .upper_count = @intCast(u32, uppers.len),
+            .lower_count = @intCast(u32, lowers.len),
+            .increment = 1,
+            .buffer = undefined,
+        };
+
+        var i: usize = 0;
+        for (uppers) |upper| {
+            result.buffer[i] = upper;
+            i += 1;
+        }
+        for (lowers) |lower| {
+            result.buffer[i] = lower;
+            i += 1;
+        }
+        return result;
+    }
+
+    inline fn toSlice(self: @This()) []const YIntersection {
+        const start_index = if (self.upper_index_start < self.lower_index_start) self.upper_index_start else self.lower_index_start;
+        return self.buffer[start_index .. start_index + (self.upper_count + self.lower_count)];
+    }
+
+    inline fn length(self: @This()) usize {
+        return self.upper_count + self.lower_count;
+    }
+
+    inline fn at(self: @This(), index: usize) YIntersection {
+        return self.toSlice()[index];
+    }
+
+    // Two points are 't_connected', if there doesn't exist a closer t value
+    // going in the same direction (Forward or reverse)
+    inline fn isTConnected(self: @This(), base_index: usize, candidate_index: usize, max_t: f64) bool {
+        const slice = self.toSlice();
+        const base_t = slice[base_index].t;
+        const candidate_t = slice[candidate_index].t;
+        if (base_t == candidate_t) return true;
+
+        const dist_forward = @mod(candidate_t + (max_t - base_t), max_t);
+        std.debug.assert(dist_forward >= 0.0);
+        std.debug.assert(dist_forward < max_t);
+
+        const dist_reverse = @mod(@fabs(base_t + (max_t - candidate_t)), max_t);
+        std.debug.assert(dist_reverse >= 0.0);
+        std.debug.assert(dist_reverse < max_t);
+
+        const is_forward = if (dist_forward < dist_reverse) true else false;
+        if (is_forward) {
+            for (slice) |other, other_i| {
+                if (other.t == base_t or other.t == candidate_t) continue;
+                if (other_i == candidate_index or other_i == base_index) continue;
+                const dist_other = @mod(other.t + (max_t - base_t), max_t);
+                if (dist_other < dist_forward) {
+                    std.debug.print("Better match (forward) [{d}] t {d}: [{d}] t {d}\n", .{
+                        base_index, base_t,
+                        other_i,    other.t,
+                    });
+                    return false;
+                }
+            }
+            return true;
+        }
+        for (slice) |other, other_i| {
+            if (other.t == base_t or other.t == candidate_t) continue;
+            if (other_i == candidate_index or other_i == base_index) continue;
+            const dist_other = @mod(@fabs(base_t + (max_t - other.t)), max_t);
+            if (dist_other < dist_reverse) {
+                std.debug.print("Better match (reverse) [{d}] t {d}: [{d}] t {d}\n", .{
+                    base_index, base_t,
+                    other_i,    other.t,
+                });
+                return false;
+            }
+        }
+        return true;
+    }
+
+    fn swapScanlines(self: *@This()) !void {
+        self.lower_index_start = self.upper_index_start;
+        self.lower_count = self.upper_count;
+        self.upper_count = 0;
+        self.upper_index_start = blk: {
+            const lower_index_end = self.lower_index_start + self.lower_count;
+            const space_forward = self.capacity - lower_index_end;
+            const space_behind = self.lower_index_start;
+            if (space_forward > space_behind) {
+                self.increment = 1;
+                break :blk lower_index_end;
+            }
+            self.increment = 1;
+            break :blk self.lower_index_start - 1;
+        };
+    }
+
+    inline fn add(self: *@This(), intersection: YIntersection) !void {
+        self.buffer[self.upper_index_start + self.increment] = intersection;
+        self.upper_count += 1;
+    }
+};
+
+test "isTConnected" {
+    const expect = std.testing.expect;
+    const max_t = 20.0;
+    // 1, 5, 0, 4, 3, 2
+    const example_outline = [_]f64{ 6.5, 0.3, 19.3, 15.6, 8.7, 3.4 };
+    try expect(isTConnected(example_outline[0..], 5, 0, max_t) == true);
+    try expect(isTConnected(example_outline[0..], 2, 3, max_t) == true);
+    try expect(isTConnected(example_outline[0..], 1, 2, max_t) == true);
+    try expect(isTConnected(example_outline[0..], 5, 1, max_t) == true);
+    try expect(isTConnected(example_outline[0..], 4, 0, max_t) == true);
+    try expect(isTConnected(example_outline[0..], 4, 3, max_t) == true);
+    try expect(isTConnected(example_outline[0..], 2, 3, max_t) == true);
+    try expect(isTConnected(example_outline[0..], 2, 1, max_t) == true);
+    try expect(isTConnected(example_outline[0..], 1, 0, max_t) == false);
+    try expect(isTConnected(example_outline[0..], 5, 4, max_t) == false);
+    try expect(isTConnected(example_outline[0..], 5, 3, max_t) == false);
+    try expect(isTConnected(example_outline[0..], 4, 2, max_t) == false);
+    try expect(isTConnected(example_outline[0..], 1, 3, max_t) == false);
+}
+
+inline fn isTConnected(other_slice: []const f64, base_index: usize, candidate_index: usize, max_t: f64) bool {
+    const base_t = other_slice[base_index];
+    const candidate_t = other_slice[candidate_index];
+    if (base_t == candidate_t) return true;
+
+    const dist_forward = @mod(candidate_t + (max_t - base_t), max_t);
+    std.debug.assert(dist_forward >= 0.0);
+    std.debug.assert(dist_forward < max_t);
+
+    const dist_reverse = @mod(@fabs(base_t + (max_t - candidate_t)), max_t);
+    std.debug.assert(dist_reverse >= 0.0);
+    std.debug.assert(dist_reverse < max_t);
+
+    const is_forward = if (dist_forward < dist_reverse) true else false;
+    if (is_forward) {
+        for (other_slice) |other, other_i| {
+            if (other.t == base_t or other.t == candidate_t) continue;
+            if (other_i == candidate_index or other_i == base_index) continue;
+            const dist_other = @mod(other + (max_t - base_t), max_t);
+            if (dist_other < dist_forward) {
+                std.debug.print("Better match (forward) [{d}] t {d}: [{d}] t {d}\n", .{
+                    base_index, base_t,
+                    other_i,    other.t,
+                });
+                return false;
+            }
+        }
+        return true;
+    }
+    for (other_slice) |other, other_i| {
+        if (other.t == base_t or other.t == candidate_t) continue;
+        if (other_i == candidate_index or other_i == base_index) continue;
+        const dist_other = @mod(@fabs(base_t + (max_t - other)), max_t);
+        if (dist_other < dist_reverse) {
+            std.debug.print("Better match (reverse) [{d}] t {d}: [{d}] t {d}\n", .{
+                base_index, base_t,
+                other_i,    other.t,
+            });
+            return false;
+        }
+    }
+    return true;
+}
+
+// test "sortByT" {
+//     const expect = std.testing.expect;
+//     var result_buffer: [10]usize = undefined;
+//     const unsorted = [_]usize{ 5, 4, 2, 6 };
+//     const slice: []const usize = unsorted[0..];
+//     const a = sortByT(usize, slice, result_buffer[0 .. slice.len + 2]);
+//     print("\n", .{});
+//     for (a) |x| {
+//         print("{d} ", .{x});
+//     }
+//     print("\n", .{});
+//     try expect(a[0] == 3);
+//     try expect(a[1] == 2);
+//     try expect(a[2] == 1);
+//     try expect(a[3] == 0);
+//     try expect(a[4] == 3);
+//     try expect(a[5] == 2);
+// }
+
+fn combineIntersectionLists3(
+    uppers: []const YIntersection,
+    lowers: []const YIntersection,
+    base_scanline: f64,
+    outlines: []const Outline,
+) !IntersectionConnectionList {
+    //
+    // Lines are connected if:
+    // 1. Connected by T
+    // 2. Middle t lies within scanline
+    //
+    // TODO:
+    const outline = outlines[0];
+    const outline_max_t = @intToFloat(f64, outline.segments.len);
+
+    // print("Uppers:\n");
+    // for (uppers) |u, u_i| u.print(1, true, u_i);
+    // print("Lowers:\n");
+    // for (lowers) |u, u_i| u.print(1, true, u_i);
+
+    const intersections = IntersectionList.makeFromSeperateScanlines(uppers, lowers);
+    print("Printing custom intersection buffer\n");
+    intersections.print();
+
+    // print("Slice:\n");
+    // for (intersections.slice()) |intersection, i| {
+    //     intersection.print(1, true, i);
+    // }
+
+    const total_count: usize = uppers.len + lowers.len;
+    std.debug.assert(intersections.length() == total_count);
+
+    var pair_list: [10][2]usize = undefined;
+    var pair_count: usize = 0;
+    for (intersections.toSlice()) |intersection, intersection_i| {
+        if (intersection_i == intersections.length() - 1) break;
+        var other_i: usize = intersection_i + 1;
+        while (other_i < total_count) : (other_i += 1) {
+            const other_intersection = intersections.at(other_i);
+            if (intersection.t == other_intersection.t) continue;
+            const within_scanline = blk: {
+                const middle_t = minTMiddle(intersection.t, other_intersection.t, outline_max_t);
+                // TODO: Specialized implementation of samplePoint just for y value
+                const sample_point = outline.samplePoint(middle_t);
+                const relative_y = sample_point.y - base_scanline;
+                std.debug.print("relative_y: {d}\n", .{relative_y});
+                break :blk (sample_point.y >= (base_scanline - 1.0) and sample_point.y >= base_scanline);
+            };
+            if (!within_scanline) {
+                continue;
+            }
+            const is_t_connected = intersections.isTConnected(intersection_i, other_i, outline_max_t);
+            std.debug.print("[{d}] t ({d}) with [{d}] t ({d}). t_connected? {}\n", .{
+                intersection_i,
+                intersection.t,
+                other_i,
+                other_intersection.t,
+                is_t_connected,
+            });
+            if (is_t_connected) {
+                std.debug.print("Connected pair: [{d}] {d} -> [{d}] {d}\n", .{
+                    intersection_i,
+                    intersection.x_intersect,
+                    other_i,
+                    other_intersection.x_intersect,
+                });
+                // Sort by x_intersect ?
+                pair_list[pair_count][0] = intersection_i;
+                pair_list[pair_count][1] = other_i;
+                pair_count += 1;
+            }
+        }
+    }
+
+    {
+        var i: usize = 0;
+        print("Connected pairs:\n");
+        while (i < pair_count) : (i += 1) {
+            const p = pair_list[i];
+            const a = intersections.at(p[0]);
+            const b = intersections.at(p[1]);
+            std.debug.print("[{d}]: t {d} x {d} -> t {d} x {d}\n", .{
+                i,
+                a.t,
+                a.x_intersect,
+                b.t,
+                b.x_intersect,
+            });
+        }
+        print("\n");
+    }
+
+    const min_pair_count = @divTrunc(total_count, 2);
+    std.debug.print("Min pair count: {d} actual count {d}\n", .{ min_pair_count, pair_count });
+
+    std.debug.assert(pair_count >= min_pair_count);
+
+    //
+    // If pair is on the same line, ignore
+    // If pair is on diff line, start search for pair
+    //    a. If pair is started between, invert
+    //    b. If pair found, complete upper -> lower connection
+    // Pair:
+    // up, down, down, up
+    // down, up, up, down
+    //
+
+    var connection_list = IntersectionConnectionList{ .buffer = undefined, .len = 0 };
+    // for (pair_list[0..pair_count]) |pair| {
+    //     //
+    //     //
+    // }
+
+    return connection_list;
+
+    //
+    // Other
+    //
+
+    // const total_count: usize = uppers.len + lowers.len;
+    // std.debug.assert(total_count % 2 == 0);
+    // const sorted_t_count: usize = 0;
+    // const sorted_t: [16]u32 = blk: {
+    //     var sorted: [16]u32 = undefined;
+    //     var i: usize = 0;
+    //     while (i < total_count) : (i += 1) {
+    //         for (uppers) |upper| {
+    //             sorted[i] = upper.t;
+    //         }
+    //     }
+    //     break :blk sorted;
+    // };
+
+    // var i: usize = 0;
+    // while (i < total_count) : (i += 1) {
+    //     var x: usize = i + 1;
+    //     const is_upper = (i < uppers.len);
+    //     const current_t = if (is_upper) uppers[i].t else lowers[i - uppers.len].t;
+    //     while (x < total_count) : (x += 1) {
+    //         const same_scanline = (is_upper == (x < uppers.len));
+    //         const is_t_connected = blk: {
+    //             const t = if (is_upper) uppers[x].t else lowers[x - uppers.len].t;
+    //             const positive = (current_t <= t);
+    //             const dist_forward = if (positive) t - current_t else t + (t_max - current_t);
+    //             const dist_reverse = t_max - dist_forward;
+    //             const min = if (current_t < t) current_t else current_t + t_max;
+    //             const max = if (current_t < t) t else t + t_max;
+    //             var k: usize = 0;
+    //             while (k < total_count) : (k += 1) {
+    //                 const test_t = if (is_upper) uppers[k].t else lowers[k - uppers.len].t;
+    //                 const maybe_middle = if (test_t >= current_t) test_t else test_t + max;
+    //                 if (maybe_middle >= min and maybe_middle <= max) break :blk true;
+    //             }
+    //             break :blk false;
+    //         };
+    //     }
+    // }
+
+    // const sorted_t: [16]usize = undefined;
+    // var i: usize = 0;
+    // var pairs: [16][2]usize = undefined;
+    // while (i < total_count) : (i += 1) {
+    //     // Duplicate last element at beginning to avoid messy logic
+    //     var t_index: usize = 1;
+    //     var t_neighbours: [2]usize = undefined;
+    //     while (t_index < total_count + 1) : (t_index += 1) {
+    //         if (sorted_t[t_index] == i) {
+    //             t_neighbours[0] = sorted_t[t_index - 1];
+    //             t_neighbours[1] = sorted_t[t_index + 1];
+    //             break;
+    //         }
+    //     }
+    // }
+    // var matched_upper = [1]bool{false} ** 16;
+    // var matched_lower = [1]bool{false} ** 16;
+    // for (uppers) |upper| {
+    //     const next_t: f64 = undefined;
+    //     const next_t_index: usize = undefined;
+    //     const prev_t: f64 = undefined;
+    //     const prev_t_index: f64 = undefined;
+    // }
+}
+
+fn combineIntersectionLists2(uppers: []YIntersection, lowers: []YIntersection, t_max: f64) !IntersectionConnectionList {
+    util.print("Working\n");
+
+    const printf = std.debug.print;
+    printf("Combining intersection lists\n", .{});
+    printf("  Upper:\n", .{});
+    for (uppers) |upper, upper_i| {
+        upper.print(2, true, upper_i);
+    }
+    printf("  Lower:\n", .{});
+    for (lowers) |lower, lower_i| {
+        lower.print(2, true, lower_i);
+    }
+    printf("\n", .{});
+
     const IntersectionMeta = struct {
         const Scanline = enum(u8) {
             upper,
@@ -624,8 +1116,6 @@ fn combineIntersectionLists2(upper_list: YIntersectionList, lower_list: YInterse
         scanline: @This().Scanline,
         index: u8,
     };
-    var uppers = upper_list.buffer[0..upper_list.len];
-    var lowers = lower_list.buffer[0..lower_list.len];
     const leftmost_meta = blk: {
         var best_match_x: f64 = std.math.floatMax(f64);
         var best_match_meta: IntersectionMeta = undefined;
@@ -649,16 +1139,22 @@ fn combineIntersectionLists2(upper_list: YIntersectionList, lower_list: YInterse
         }
         break :blk best_match_meta;
     };
+    {
+        printf("Leftmost:\n", .{});
+        const intersection = if (leftmost_meta.scanline == .upper) uppers[leftmost_meta.index] else lowers[leftmost_meta.index];
+        intersection.print(1, true, 0);
+    }
+
     const start_t = if (leftmost_meta.scanline == .upper) uppers[leftmost_meta.index].t else lowers[leftmost_meta.index].t;
     const intersection_count = uppers.len + lowers.len;
     var i: usize = 0;
     var current_t: f64 = start_t;
     var matched_upper = [1]bool{false} ** 16;
     var matched_lower = [1]bool{false} ** 16;
-    var meta: [20]IntersectionMeta = undefined;
+    var meta: [32]IntersectionMeta = undefined;
     while (i < intersection_count) : (i += 1) {
-        var best_match_t_diff = std.math.floatMax(f64);
-        var best_match_index = std.math.intMax(usize);
+        var best_match_t_diff: f64 = std.math.floatMax(f64);
+        var best_match_index: usize = std.math.maxInt(usize);
         var best_match_is_upper: bool = undefined;
         for (uppers) |upper, upper_i| {
             if (matched_upper[upper_i]) continue;
@@ -697,8 +1193,11 @@ fn combineIntersectionLists2(upper_list: YIntersectionList, lower_list: YInterse
         }
         meta[i] = .{
             .scanline = if (best_match_is_upper) .upper else .lower,
-            .index = best_match_index,
+            .index = @intCast(u8, best_match_index),
         };
+        printf("Match: is_upper {} ", .{best_match_is_upper});
+        const intersection = if (best_match_is_upper) uppers[best_match_index] else lowers[best_match_index];
+        intersection.print(1, true, best_match_index);
     }
 
     var connection_list = IntersectionConnectionList{ .buffer = undefined, .len = 0 };
@@ -712,32 +1211,106 @@ fn combineIntersectionLists2(upper_list: YIntersectionList, lower_list: YInterse
     // After this, you need to check for nested intersection pairs.
     // If you have a pair "inside" of another (In terms of x_intersect)
     // you need to set the invert_coverage flag for the middle intersect pair
+    const Entry = struct {
+        index: usize,
+        is_upper: bool,
+    };
+    var entries: [10]Entry = undefined;
+    var entries_count: usize = 0;
     while (i < intersection_count) : (i += 1) {
-        var start_is_upper: bool = undefined;
-        var upper_count: usize = 0;
-        var lower_count: usize = 0;
-        var total_count: usize = 0;
-        while (true) {
-            const is_upper = (meta[i].scanline == .upper);
-            if (total_count == 0) {
-                if (is_upper) {
-                    upper_count = 1;
-                    lower_count = 0;
-                    start_is_upper = true;
-                } else {
-                    lower_count = 1;
-                    upper_count = 0;
-                    start_is_upper = false;
+        const start_is_upper = (meta[i].scanline == .upper);
+        loop_inner: while (true) {
+            const is_upper = meta[i].scanline == .upper;
+            entries[entries_count] = .{ .index = meta[i].index, .is_upper = is_upper };
+            if (entries_count > 0 and is_upper and start_is_upper) {
+                std.log.info("upper w/ entry count {d}", .{entries_count});
+                switch (entries_count) {
+                    1 => {
+                        const a = uppers[entries[0].index];
+                        const b = uppers[entries[1].index];
+                        const start = if (a.x_intersect < b.x_intersect) a else b;
+                        const end = if (a.x_intersect < b.x_intersect) b else a;
+                        try connection_list.add(.{ .upper = .{ .start = start, .end = end }, .lower = null });
+                    },
+                    3 => {
+                        std.debug.assert(entries[0].is_upper == true);
+                        std.debug.assert(entries[1].is_upper == false);
+                        std.debug.assert(entries[2].is_upper == false);
+                        std.debug.assert(entries[3].is_upper == true);
+                        const lower = blk: {
+                            const a = uppers[entries[1].index];
+                            const b = uppers[entries[2].index];
+                            const start = if (a.x_intersect < b.x_intersect) a else b;
+                            const end = if (a.x_intersect < b.x_intersect) b else a;
+                            break :blk YIntersectionPair{
+                                .start = start,
+                                .end = end,
+                            };
+                        };
+                        const upper = blk: {
+                            const a = uppers[entries[0].index];
+                            const b = uppers[entries[3].index];
+                            const start = if (a.x_intersect < b.x_intersect) a else b;
+                            const end = if (a.x_intersect < b.x_intersect) b else a;
+                            break :blk YIntersectionPair{
+                                .start = start,
+                                .end = end,
+                            };
+                        };
+                        try connection_list.add(.{ .upper = upper, .lower = lower });
+                    },
+                    else => unreachable,
                 }
-                continue;
-            }
-            if (is_upper and start_is_upper) {
-                connection_list.add();
-            } else if (!is_upper and !start_is_upper) {} else {
-                //
+                break :loop_inner;
+            } else if (entries_count > 0 and !is_upper and !start_is_upper) {
+                std.log.info("lower w/ entry count {d}", .{entries_count});
+                switch (entries_count) {
+                    1 => {
+                        const a = lowers[entries[0].index];
+                        const b = lowers[entries[1].index];
+                        const start = if (a.x_intersect < b.x_intersect) a else b;
+                        const end = if (a.x_intersect < b.x_intersect) b else a;
+                        try connection_list.add(.{ .upper = null, .lower = .{ .start = start, .end = end } });
+                    },
+                    3 => {
+                        std.debug.assert(entries[0].is_upper == false);
+                        std.debug.assert(entries[1].is_upper == true);
+                        std.debug.assert(entries[2].is_upper == true);
+                        std.debug.assert(entries[3].is_upper == false);
+                        const lower = blk: {
+                            const a = lowers[entries[0].index];
+                            const b = lowers[entries[3].index];
+                            const start = if (a.x_intersect < b.x_intersect) a else b;
+                            const end = if (a.x_intersect < b.x_intersect) b else a;
+                            break :blk YIntersectionPair{
+                                .start = start,
+                                .end = end,
+                            };
+                        };
+                        const upper = blk: {
+                            const a = lowers[entries[1].index];
+                            const b = lowers[entries[2].index];
+                            const start = if (a.x_intersect < b.x_intersect) a else b;
+                            const end = if (a.x_intersect < b.x_intersect) b else a;
+                            break :blk YIntersectionPair{
+                                .start = start,
+                                .end = end,
+                            };
+                        };
+                        try connection_list.add(.{ .upper = upper, .lower = lower });
+                    },
+                    else => unreachable,
+                }
+                break :loop_inner;
+            } else {
+                i += 1;
+                entries_count += 1;
             }
         }
+        entries_count = 0;
     }
+    connection_list.print();
+    std.log.info("Connection list: {d}", .{connection_list.len});
     return connection_list;
 }
 
@@ -924,6 +1497,189 @@ fn combineIntersectionLists(upper_list: YIntersectionPairList, lower_list: YInte
         }
     }
     return connection_list;
+}
+
+fn calculateHorizontalLineIntersections3(scanline_y: f64, outlines: []Outline) !YIntersectionList {
+    var intersection_list = YIntersectionList{ .len = 0, .buffer = undefined };
+    const printf = std.debug.print;
+    // std.log.info("Outlines: {d}", .{outlines.len});
+    std.log.info("Calculating intersections for scanline {d}", .{scanline_y});
+    for (outlines) |outline, outline_i| {
+        // TODO: Remove
+        std.debug.assert(outline_i == 0);
+        for (outline.segments) |segment, segment_i| {
+            const point_a = segment.from;
+            const point_b = segment.to;
+            const max_y = @maximum(point_a.y, point_b.y);
+            const min_y = @minimum(point_a.y, point_b.y);
+            if (segment.isCurve()) {
+                // TODO: Improve bounding box calculation
+                // https://iquilezles.org/articles/bezierbbox/
+                const control_point = segment.control_opt.?;
+                printf("  {d:.2} Vertex (curve) A({d:.2}, {d:.2}) --> B({d:.2}, {d:.2}) C ({d:.2}, {d:.2}) -- ", .{
+                    segment_i,
+                    point_a.x,
+                    point_a.y,
+                    point_b.x,
+                    point_b.y,
+                    control_point.x,
+                    control_point.y,
+                });
+                const bezier = BezierQuadratic{ .a = point_a, .b = point_b, .control = control_point };
+                const inflection_y = quadradicBezierInflectionPoint(bezier).y;
+                const is_middle_higher = (inflection_y > max_y) and scanline_y > inflection_y;
+                const is_middle_lower = (inflection_y < min_y) and scanline_y < inflection_y;
+                if (is_middle_higher or is_middle_lower) {
+                    printf("REJECT - Outsize Y range\n", .{});
+                    {
+                        // TODO: Remove paranoia check
+                        const intersections = quadraticBezierPlaneIntersections(bezier, scanline_y);
+                        std.debug.assert(intersections[0] == null);
+                        std.debug.assert(intersections[1] == null);
+                    }
+                    continue;
+                }
+                const optional_intersection_points = quadraticBezierPlaneIntersections(bezier, scanline_y);
+                if (optional_intersection_points[0]) |first_intersection| {
+                    {
+                        const intersection = YIntersection{
+                            .outline_index = @intCast(u32, outline_i),
+                            .x_intersect = first_intersection.x,
+                            .t = @intToFloat(f64, segment_i) + first_intersection.t,
+                        };
+                        // Paranoia check
+                        // const sampled_point = outlines[intersection.outline_index].samplePoint(intersection.t);
+                        // std.log.info("\nt {d} Expected {d}, {d} Actual {d}, {d}", .{
+                        //     intersection.t,
+                        //     intersection.x_intersect,
+                        //     scanline_y,
+                        //     sampled_point.x,
+                        //     sampled_point.y,
+                        // });
+                        // std.debug.assert(floatCompare(sampled_point.x, intersection.x_intersect));
+                        // std.debug.assert(floatCompare(sampled_point.y, scanline_y));
+                        try intersection_list.add(intersection);
+                    }
+                    if (optional_intersection_points[1]) |second_intersection| {
+                        const x_diff_threshold = 0.001;
+                        if (@fabs(second_intersection.x - first_intersection.x) > x_diff_threshold) {
+                            try intersection_list.add(.{
+                                .outline_index = @intCast(u32, outline_i),
+                                .x_intersect = second_intersection.x,
+                                .t = @intToFloat(f64, segment_i) + second_intersection.t,
+                            });
+                            printf("Curve (1st & 2nd) w/ t {d} & t {d}\n", .{ @intToFloat(f64, segment_i) + first_intersection.t, @intToFloat(f64, segment_i) + second_intersection.t });
+                        } else {
+                            std.log.warn("Collapsing two points in curve into one w/ t {d}", .{@intToFloat(f64, segment_i) + first_intersection.t});
+                        }
+                    } else {
+                        printf("Curve (1st) w/ t {d}\n", .{@intToFloat(f64, segment_i) + first_intersection.t});
+                    }
+                } else if (optional_intersection_points[1]) |second_intersection| {
+                    try intersection_list.add(.{
+                        .outline_index = @intCast(u32, outline_i),
+                        .x_intersect = second_intersection.x,
+                        .t = @intToFloat(f64, segment_i) + second_intersection.t,
+                    });
+                    printf("Curve (2nd) w/ t {d}\n", .{@intToFloat(f64, segment_i) + second_intersection.t});
+                } else {
+                    printf("REJECT - Non intersecting\n", .{});
+                }
+                continue;
+            }
+
+            //
+            // Outline segment is a line
+            //
+            printf("  {d:.2} Vertex (line) {d:^5.2} x {d:^5.2} --> {d:^5.2} x {d:^5.2} -- ", .{ segment_i, point_a.x, point_a.y, point_b.x, point_b.y });
+            std.debug.assert(max_y >= min_y);
+            if (scanline_y > max_y or scanline_y < min_y) {
+                printf("REJECT - Outsize Y range\n", .{});
+                continue;
+            }
+            if (point_a.y == point_b.y) {
+                printf("REJECT - horizontal\n", .{});
+                continue;
+            }
+
+            const interp_t = blk: {
+                if (scanline_y == 0) {
+                    if (point_a.y == 0.0) break :blk 0.0;
+                    if (point_b.y == 0.0) break :blk 1.0;
+                    unreachable;
+                }
+                // TODO: Add comment. Another varient of lerp func
+                // a - (b - a) * t = p`
+                // p - a = (b - a) * t
+                // (p - a) / (b - a) = t
+                break :blk (scanline_y - point_a.y) / (point_b.y - point_a.y);
+            };
+            // std.log.info("\nInterp_t {d} scanline {d} : a ({d}, {d}), b ({d}, {d})", .{
+            //     interp_t,
+            //     scanline_y,
+            //     point_a.x,
+            //     point_a.y,
+            //     point_b.x,
+            //     point_b.x,
+            // });
+            std.debug.assert(interp_t >= 0.0 and interp_t <= 1.0);
+            const t = @intToFloat(f64, segment_i) + interp_t;
+            if (point_a.x == point_b.x) {
+                try intersection_list.add(.{
+                    .outline_index = @intCast(u32, outline_i),
+                    .x_intersect = point_a.x,
+                    .t = t,
+                });
+                printf("Vertical line w/ t {d}\n", .{t});
+            } else {
+                const x_diff = point_a.x - point_b.x;
+                const x_intersect = point_a.x + (x_diff * interp_t);
+                // const y_diff = point_a.y - point_b.y;
+                // const x_intersect = horizontalPlaneIntersection(scanline_y, point_a, point_b);
+                // std.log.info("intersection: {d}", .{x_intersect});
+                try intersection_list.add(.{
+                    .outline_index = @intCast(u32, outline_i),
+                    .x_intersect = x_intersect,
+                    .t = t,
+                });
+                printf("Line w/ t {d}\n", .{t});
+            }
+        }
+    }
+
+    std.log.info("{d} intersections found", .{intersection_list.len});
+
+    // TODO:
+    std.debug.assert(intersection_list.len % 2 == 0);
+
+    for (intersection_list.toSlice()) |intersection| {
+        std.debug.assert(intersection.outline_index >= 0);
+        std.debug.assert(intersection.outline_index < outlines.len);
+        const max_t = @intToFloat(f64, outlines[intersection.outline_index].segments.len);
+        std.debug.assert(intersection.t >= 0.0);
+        std.debug.assert(intersection.t < max_t);
+    }
+
+    // Sort by x_intersect ascending
+    var step: usize = 1;
+    while (step < intersection_list.len) : (step += 1) {
+        const key = intersection_list.buffer[step];
+        var x = @intCast(i64, step) - 1;
+        while (x >= 0 and intersection_list.buffer[@intCast(usize, x)].x_intersect > key.x_intersect) : (x -= 1) {
+            intersection_list.buffer[@intCast(usize, x) + 1] = intersection_list.buffer[@intCast(usize, x)];
+        }
+        intersection_list.buffer[@intCast(usize, x + 1)] = key;
+    }
+
+    for (intersection_list.buffer[0..intersection_list.len]) |intersection| {
+        std.debug.assert(intersection.outline_index >= 0);
+        std.debug.assert(intersection.outline_index < outlines.len);
+        const max_t = @intToFloat(f64, outlines[intersection.outline_index].segments.len);
+        std.debug.assert(intersection.t >= 0.0);
+        std.debug.assert(intersection.t < max_t);
+    }
+
+    return intersection_list;
 }
 
 fn calculateHorizontalLineIntersections2(scanline_y: f64, outlines: []Outline) !YIntersectionPairList {
@@ -1605,7 +2361,7 @@ const Vertex = packed struct {
 fn printVertices(vertices: []Vertex, scale: f64) void {
     for (vertices) |vertex, i| {
         assert(vertex.kind <= @enumToInt(VMove.cubic));
-        print("{d:^2} : {} xy ({d:^5.2}, {d:^5.2}) cxcy ({d:^5.2},{d:^5.2})\n", .{
+        std.debug.print("{d:^2} : {} xy ({d:^5.2}, {d:^5.2}) cxcy ({d:^5.2},{d:^5.2})\n", .{
             i,
             @intToEnum(VMove, vertex.kind),
             @intToFloat(f64, vertex.x) * scale,
@@ -3499,7 +4255,7 @@ pub fn initializeFont(allocator: Allocator, font_data: []u8) !FontInfo {
             const offset = try reader.readIntBig(u32);
             const length = try reader.readIntBig(u32);
 
-            print("{d:2}.    {s}\n", .{ i + 1, tag });
+            std.debug.print("{d:2}.    {s}\n", .{ i + 1, tag });
 
             if (std.mem.eql(u8, "cmap", tag)) {
                 data_sections.cmap.offset = offset;
