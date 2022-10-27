@@ -675,14 +675,19 @@ test "minTDistance" {
 }
 
 inline fn minTMiddle(a: f64, b: f64, max: f64) f64 {
+    // std.debug.print("minTMiddle: a {d}, b {d}, max {d}\n", .{ a, b, max });
     const positive = (a <= b);
     const dist_forward = if (positive) b - a else b + (max - a);
     const dist_reverse = if (positive) max - dist_forward else a - b;
     if (dist_forward < dist_reverse) {
         return @mod(a + (dist_forward / 2.0), max);
     }
-    var middle = b + (dist_reverse / 2.0);
-    return if (middle >= 0.0) middle else middle + max;
+    var middle = @mod(b + (dist_reverse / 2.0), max);
+    const result = if (middle >= 0.0) middle else middle + max;
+    // std.debug.print("result: {d}\n", .{result});
+    std.debug.assert(result >= 0.0);
+    std.debug.assert(result <= max);
+    return result;
 }
 
 test "minTMiddle" {
@@ -690,6 +695,7 @@ test "minTMiddle" {
     try expect(minTMiddle(0.2, 0.5, 1.0) == 0.35);
     try expect(minTMiddle(0.5, 0.4, 1.0) == 0.45);
     try expect(minTMiddle(0.8, 0.2, 1.0) == 0.0);
+    try expect(minTMiddle(16.0, 2.0, 20.0) == 19.0);
 }
 
 const IntersectionList = struct {
@@ -755,6 +761,12 @@ const IntersectionList = struct {
 
     inline fn at(self: @This(), index: usize) YIntersection {
         return self.toSlice()[index];
+    }
+
+    inline fn isUpper(self: @This(), index: usize) bool {
+        const upper_start: u32 = self.upper_index_start;
+        const upper_end: i64 = upper_start + self.upper_count - 1;
+        return (upper_start >= upper_end and index >= upper_start and index <= upper_end);
     }
 
     // Two points are 't_connected', if there doesn't exist a closer t value
@@ -863,28 +875,28 @@ inline fn isTConnected(other_slice: []const f64, base_index: usize, candidate_in
     const is_forward = if (dist_forward < dist_reverse) true else false;
     if (is_forward) {
         for (other_slice) |other, other_i| {
-            if (other.t == base_t or other.t == candidate_t) continue;
+            if (other == base_t or other == candidate_t) continue;
             if (other_i == candidate_index or other_i == base_index) continue;
             const dist_other = @mod(other + (max_t - base_t), max_t);
             if (dist_other < dist_forward) {
-                std.debug.print("Better match (forward) [{d}] t {d}: [{d}] t {d}\n", .{
-                    base_index, base_t,
-                    other_i,    other.t,
-                });
+                // std.debug.print("Better match (forward) [{d}] t {d}: [{d}] t {d}\n", .{
+                //     base_index, base_t,
+                //     other_i,    other,
+                // });
                 return false;
             }
         }
         return true;
     }
     for (other_slice) |other, other_i| {
-        if (other.t == base_t or other.t == candidate_t) continue;
+        if (other == base_t or other == candidate_t) continue;
         if (other_i == candidate_index or other_i == base_index) continue;
         const dist_other = @mod(@fabs(base_t + (max_t - other)), max_t);
         if (dist_other < dist_reverse) {
-            std.debug.print("Better match (reverse) [{d}] t {d}: [{d}] t {d}\n", .{
-                base_index, base_t,
-                other_i,    other.t,
-            });
+            // std.debug.print("Better match (reverse) [{d}] t {d}: [{d}] t {d}\n", .{
+            //     base_index, base_t,
+            //     other_i,    other,
+            // });
             return false;
         }
     }
@@ -910,6 +922,8 @@ inline fn isTConnected(other_slice: []const f64, base_index: usize, candidate_in
 //     try expect(a[5] == 2);
 // }
 
+// Assumptions
+// 1.
 fn combineIntersectionLists3(
     uppers: []const YIntersection,
     lowers: []const YIntersection,
@@ -976,9 +990,10 @@ fn combineIntersectionLists3(
                     other_i,
                     other_intersection.x_intersect,
                 });
-                // Sort by x_intersect ?
-                pair_list[pair_count][0] = intersection_i;
-                pair_list[pair_count][1] = other_i;
+                // Sort by x_intersect so that [0] is start, and [1] is end
+                const swap = intersection.x_intersect > other_intersection.x_intersect;
+                pair_list[pair_count][0] = if (swap) other_i else intersection_i;
+                pair_list[pair_count][1] = if (swap) intersection_i else other_i;
                 pair_count += 1;
             }
         }
@@ -1007,6 +1022,83 @@ fn combineIntersectionLists3(
 
     std.debug.assert(pair_count >= min_pair_count);
 
+    var connection_list = IntersectionConnectionList{ .buffer = undefined, .len = 0 };
+    {
+        var matched = [1]bool{false} ** 32;
+        var i: usize = 0;
+        while (i < pair_count) : (i += 1) {
+            if (matched[i]) continue;
+            const index_start = pair_list[i][0];
+            const index_end = pair_list[i][1];
+            const start = intersections.at(index_start);
+            const end = intersections.at(index_end);
+            std.debug.assert(start.x_intersect <= end.x_intersect);
+            const start_is_upper = intersections.isUpper(index_start);
+            const end_is_upper = intersections.isUpper(index_end);
+            if (start_is_upper == end_is_upper) {
+                const intersection_pair = YIntersectionPair{
+                    .start = start,
+                    .end = end,
+                };
+                if (start_is_upper) {
+                    try connection_list.add(.{ .upper = intersection_pair, .lower = null });
+                } else {
+                    try connection_list.add(.{ .upper = null, .lower = intersection_pair });
+                }
+            } else {
+                //
+                // Pair touches both scanlines
+                // You need to find the match
+                // Match criteria:
+                // 1. Also across both scanlines
+                // 2. Has the most leftmost point
+                //
+                var x: usize = i + 1;
+                const ref_x_intersect: f64 = @maximum(start.x_intersect, end.x_intersect);
+                var smallest_x: f64 = std.math.floatMax(f64);
+                var smallest_index_opt: ?usize = null;
+                while (x < pair_count) : (x += 1) {
+                    const comp_index_start = pair_list[x][0];
+                    const comp_index_end = pair_list[x][1];
+                    const comp_start = intersections.at(comp_index_start);
+                    const comp_end = intersections.at(comp_index_end);
+                    const other_x = @minimum(comp_start.x_intersect, comp_end.x_intersect);
+                    if (other_x >= ref_x_intersect and other_x < smallest_x) {
+                        smallest_x = comp_start.x_intersect;
+                        smallest_index_opt = x;
+                    }
+                }
+                if (smallest_index_opt) |smallest_index| {
+                    const match_pair = pair_list[smallest_index];
+                    const match_start = intersections.at(match_pair[0]);
+                    const match_end = intersections.at(match_pair[1]);
+                    const upper_start = if (start_is_upper) start else match_start;
+                    const upper_end = if (end_is_upper) end else match_end;
+                    const lower_start = if (start_is_upper) match_start else start;
+                    const lower_end = if (end_is_upper) match_end else end;
+
+                    std.debug.assert(!start_is_upper or intersections.isUpper(match_pair[0]));
+                    std.debug.assert(!end_is_upper or intersections.isUpper(match_pair[1]));
+
+                    const upper = YIntersectionPair{
+                        .start = upper_start,
+                        .end = upper_end,
+                    };
+                    const lower = YIntersectionPair{
+                        .start = lower_start,
+                        .end = lower_end,
+                    };
+                    try connection_list.add(.{ .upper = upper, .lower = lower });
+                } else {
+                    return error.FailedToFindMatch;
+                }
+            }
+        }
+    }
+
+    // Assert that pairs on same line don't intersection
+    // I.e When a pair "opens", it closes before the next pair starts
+
     //
     // If pair is on the same line, ignore
     // If pair is on diff line, start search for pair
@@ -1017,7 +1109,6 @@ fn combineIntersectionLists3(
     // down, up, up, down
     //
 
-    var connection_list = IntersectionConnectionList{ .buffer = undefined, .len = 0 };
     // for (pair_list[0..pair_count]) |pair| {
     //     //
     //     //
@@ -1677,6 +1768,15 @@ fn calculateHorizontalLineIntersections3(scanline_y: f64, outlines: []Outline) !
         const max_t = @intToFloat(f64, outlines[intersection.outline_index].segments.len);
         std.debug.assert(intersection.t >= 0.0);
         std.debug.assert(intersection.t < max_t);
+    }
+
+    // TODO:
+    if (intersection_list.len == 2) {
+        const a = intersection_list.buffer[0];
+        const b = intersection_list.buffer[0];
+        if (a.t == b.t) {
+            intersection_list.len = 0;
+        }
     }
 
     return intersection_list;
