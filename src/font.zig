@@ -977,41 +977,61 @@ fn combineIntersectionLists(
 
     var pair_list: [10][2]usize = undefined;
     var pair_count: usize = 0;
-    for (intersections.toSlice()) |intersection, intersection_i| {
-        if (intersection_i == intersections.length() - 1) break;
-        const intersection_outline_index = intersection.outline_index;
-        const intersection_outline = outlines[intersection_outline_index];
-        const outline_max_t = @intToFloat(f64, intersection_outline.segments.len);
-        var other_i: usize = intersection_i + 1;
-        std.debug.print("Checking matches of {d}\n", .{intersection_i});
-        while (other_i < total_count) : (other_i += 1) {
-            const other_intersection = intersections.at(other_i);
-            if (intersection.t == other_intersection.t) continue;
-            const other_intersection_outline_index = other_intersection.outline_index;
-            if (other_intersection_outline_index != intersection_outline_index) continue;
-            std.debug.print("  Comparing with {d}\n", .{other_i});
-            const within_scanline = blk: {
-                const middle_t = minTMiddle(intersection.t, other_intersection.t, outline_max_t);
-                // TODO: Specialized implementation of samplePoint just for y value
-                const sample_point = intersection_outline.samplePoint(middle_t);
-                std.debug.print("  Sample point @t {d}: {d}, {d}\n", .{ middle_t, sample_point.x, sample_point.y });
-                // std.debug.print("", .{});
-                const relative_y = sample_point.y - base_scanline;
-                std.debug.print("  relative_y: {d}\n", .{relative_y});
-                break :blk relative_y >= 0.0 and relative_y <= 1.0;
-            };
-            if (!within_scanline) {
-                continue;
+    {
+        var matched = [1]bool{false} ** 32;
+        for (intersections.toSlice()) |intersection, intersection_i| {
+            if (intersection_i == intersections.length() - 1) break;
+            if (matched[intersection_i] == true) continue;
+            const intersection_outline_index = intersection.outline_index;
+            const intersection_outline = outlines[intersection_outline_index];
+            const outline_max_t = @intToFloat(f64, intersection_outline.segments.len);
+            var other_i: usize = intersection_i + 1;
+            std.debug.print("Checking matches of {d}\n", .{intersection_i});
+            var smallest_t_diff = std.math.floatMax(f64);
+            var best_match_index: ?usize = null;
+            while (other_i < total_count) : (other_i += 1) {
+                if (matched[other_i] == true) continue;
+                const other_intersection = intersections.at(other_i);
+                if (intersection.t == other_intersection.t) continue;
+                const other_intersection_outline_index = other_intersection.outline_index;
+                if (other_intersection_outline_index != intersection_outline_index) continue;
+                std.debug.print("  Comparing with {d}\n", .{other_i});
+                const within_scanline = blk: {
+                    const middle_t = minTMiddle(intersection.t, other_intersection.t, outline_max_t);
+                    // TODO: Specialized implementation of samplePoint just for y value
+                    const sample_point = intersection_outline.samplePoint(middle_t);
+                    std.debug.print("  Sample point @t {d}: {d}, {d}\n", .{ middle_t, sample_point.x, sample_point.y });
+                    const relative_y = sample_point.y - base_scanline;
+                    std.debug.print("  relative_y: {d}\n", .{relative_y});
+                    break :blk relative_y >= 0.0 and relative_y <= 1.0;
+                };
+                if (!within_scanline) {
+                    continue;
+                }
+                const is_t_connected = intersections.isTConnected(intersection_i, other_i, outline_max_t);
+                if (is_t_connected) {
+                    // TODO: This doesn't take into account wrapping
+                    const t_diff = @fabs(intersection.t - other_intersection.t);
+                    if (t_diff < smallest_t_diff) {
+                        smallest_t_diff = t_diff;
+                        best_match_index = other_i;
+                    }
+                    std.log.info("Potential match with index {d}", .{other_i});
+                } else {
+                    std.log.info("Rejected because not t connected", .{});
+                }
             }
-            const is_t_connected = intersections.isTConnected(intersection_i, other_i, outline_max_t);
-            if (is_t_connected) {
-                const swap = intersection.x_intersect > other_intersection.x_intersect;
-                pair_list[pair_count][0] = if (swap) other_i else intersection_i;
-                pair_list[pair_count][1] = if (swap) intersection_i else other_i;
+            if (best_match_index) |match_index| {
+                std.log.info("Matched with index {d}", .{match_index});
+                const match_intersection = intersections.at(match_index);
+                const swap = intersection.x_intersect > match_intersection.x_intersect;
+                pair_list[pair_count][0] = if (swap) match_index else intersection_i;
+                pair_list[pair_count][1] = if (swap) intersection_i else match_index;
+                matched[match_index] = true;
+                matched[intersection_i] = true;
                 pair_count += 1;
-                std.log.info("Connected with index {d}", .{other_i});
             } else {
-                std.log.info("Rejected because not t connected", .{});
+                std.debug.assert(false);
             }
         }
     }
