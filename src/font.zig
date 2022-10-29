@@ -507,24 +507,6 @@ const Outline = struct {
     }
 };
 
-const Shape = struct {
-    outlines: []Outline,
-
-    pub fn horizontalIntersections(self: @This(), buffer: []YIntersection, x_axis: f64) []YIntersection {
-        var count: usize = 0;
-        for (self.outlines) |outline, outline_i| {
-            const c = outline.horizontalIntersections(buffer[count..], x_axis).len;
-            for (buffer[count .. count + c]) |*intersection| {
-                intersection.*.outline_index = outline_i;
-            }
-            count += c;
-            std.debug.assert(count < buffer.len);
-        }
-        // Sort by x ascending
-        return buffer[0..count];
-    }
-};
-
 const SampledPoint = struct {
     p: Point(f64),
     t: f64,
@@ -539,7 +521,13 @@ const YIntersection = struct {
     pub fn print(self: @This(), comptime indent_level: comptime_int, comptime newline: bool, index: usize) void {
         const printf = std.debug.print;
         const indent = "  " ** indent_level;
-        printf("{s}{d:.2}. t {d:.4}  x_intersect {d:.4}", .{ indent, index, self.t, self.x_intersect });
+        printf("{s}{d:.2}. t {d:.4}  x_intersect {d:.4} outline_index: {d}", .{
+            indent,
+            index,
+            self.t,
+            self.x_intersect,
+            self.outline_index,
+        });
         if (newline) {
             std.debug.print("\n", .{});
         }
@@ -798,6 +786,10 @@ const IntersectionList = struct {
     // going in the same direction (Forward or reverse)
     inline fn isTConnected(self: @This(), base_index: usize, candidate_index: usize, max_t: f64) bool {
         const slice = self.toSlice();
+
+        const base_outline_index = slice[base_index].outline_index;
+        std.debug.assert(base_outline_index == slice[candidate_index].outline_index);
+
         const base_t = slice[base_index].t;
         const candidate_t = slice[candidate_index].t;
         if (base_t == candidate_t) return true;
@@ -815,6 +807,7 @@ const IntersectionList = struct {
             for (slice) |other, other_i| {
                 if (other.t == base_t or other.t == candidate_t) continue;
                 if (other_i == candidate_index or other_i == base_index) continue;
+                if (other.outline_index != base_index) continue;
                 const dist_other = @mod(other.t + (max_t - base_t), max_t);
                 if (dist_other < dist_forward) {
                     // std.debug.print("Better match (forward) [{d}] t {d}: [{d}] t {d}\n", .{
@@ -829,6 +822,7 @@ const IntersectionList = struct {
         for (slice) |other, other_i| {
             if (other.t == base_t or other.t == candidate_t) continue;
             if (other_i == candidate_index or other_i == base_index) continue;
+            if (other.outline_index != base_index) continue;
             const dist_other = @mod(@fabs(base_t + (max_t - other.t)), max_t);
             if (dist_other < dist_reverse) {
                 // std.debug.print("Better match (reverse) [{d}] t {d}: [{d}] t {d}\n", .{
@@ -961,13 +955,8 @@ fn combineIntersectionLists(
     // 2. Middle t lies within scanline
     //
     // TODO:
-    const outline = outlines[0];
-    const outline_max_t = @intToFloat(f64, outline.segments.len);
-
-    // print("Uppers:\n");
-    // for (uppers) |u, u_i| u.print(1, true, u_i);
-    // print("Lowers:\n");
-    // for (lowers) |u, u_i| u.print(1, true, u_i);
+    // const outline = outlines[0];
+    // const outline_max_t = @intToFloat(f64, outline.segments.len);
 
     const intersections = IntersectionList.makeFromSeperateScanlines(uppers, lowers);
     print("Printing custom intersection buffer\n");
@@ -983,11 +972,6 @@ fn combineIntersectionLists(
         }
     }
 
-    // print("Slice:\n");
-    // for (intersections.slice()) |intersection, i| {
-    //     intersection.print(1, true, i);
-    // }
-
     const total_count: usize = uppers.len + lowers.len;
     std.debug.assert(intersections.length() == total_count);
 
@@ -995,16 +979,21 @@ fn combineIntersectionLists(
     var pair_count: usize = 0;
     for (intersections.toSlice()) |intersection, intersection_i| {
         if (intersection_i == intersections.length() - 1) break;
+        const intersection_outline_index = intersection.outline_index;
+        const intersection_outline = outlines[intersection_outline_index];
+        const outline_max_t = @intToFloat(f64, intersection_outline.segments.len);
         var other_i: usize = intersection_i + 1;
         std.debug.print("Checking matches of {d}\n", .{intersection_i});
         while (other_i < total_count) : (other_i += 1) {
             const other_intersection = intersections.at(other_i);
             if (intersection.t == other_intersection.t) continue;
+            const other_intersection_outline_index = other_intersection.outline_index;
+            if (other_intersection_outline_index != intersection_outline_index) continue;
             std.debug.print("  Comparing with {d}\n", .{other_i});
             const within_scanline = blk: {
                 const middle_t = minTMiddle(intersection.t, other_intersection.t, outline_max_t);
                 // TODO: Specialized implementation of samplePoint just for y value
-                const sample_point = outline.samplePoint(middle_t);
+                const sample_point = intersection_outline.samplePoint(middle_t);
                 std.debug.print("  Sample point @t {d}: {d}, {d}\n", .{ middle_t, sample_point.x, sample_point.y });
                 // std.debug.print("", .{});
                 const relative_y = sample_point.y - base_scanline;
@@ -1015,25 +1004,14 @@ fn combineIntersectionLists(
                 continue;
             }
             const is_t_connected = intersections.isTConnected(intersection_i, other_i, outline_max_t);
-            // std.debug.print("[{d}] t ({d}) with [{d}] t ({d}). t_connected? {}\n", .{
-            //     intersection_i,
-            //     intersection.t,
-            //     other_i,
-            //     other_intersection.t,
-            //     is_t_connected,
-            // });
             if (is_t_connected) {
-                // std.debug.print("Connected pair: [{d}] {d} -> [{d}] {d}\n", .{
-                //     intersection_i,
-                //     intersection.x_intersect,
-                //     other_i,
-                //     other_intersection.x_intersect,
-                // });
-                // Sort by x_intersect so that [0] is start, and [1] is end
                 const swap = intersection.x_intersect > other_intersection.x_intersect;
                 pair_list[pair_count][0] = if (swap) other_i else intersection_i;
                 pair_list[pair_count][1] = if (swap) intersection_i else other_i;
                 pair_count += 1;
+                std.log.info("Connected with index {d}", .{other_i});
+            } else {
+                std.log.info("Rejected because not t connected", .{});
             }
         }
     }
@@ -1161,11 +1139,8 @@ fn combineIntersectionLists(
 fn calculateHorizontalLineIntersections(scanline_y: f64, outlines: []Outline) !YIntersectionList {
     var intersection_list = YIntersectionList{ .len = 0, .buffer = undefined };
     const printf = std.debug.print;
-    // std.log.info("Outlines: {d}", .{outlines.len});
     std.log.info("Calculating intersections for scanline {d}", .{scanline_y});
     for (outlines) |outline, outline_i| {
-        // TODO: Remove
-        std.debug.assert(outline_i == 0);
         for (outline.segments) |segment, segment_i| {
             const point_a = segment.from;
             const point_b = segment.to;
