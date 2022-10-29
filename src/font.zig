@@ -146,8 +146,6 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
     };
     const null_pixel = graphics.RGBA(f32){ .r = 0.0, .g = 0.0, .b = 0.0, .a = 0.0 };
     std.mem.set(graphics.RGBA(f32), bitmap.pixels, null_pixel);
-    // TODO:
-    const sample_t_max = @intToFloat(f64, outlines[0].segments.len);
 
     var scanline_lower: usize = 1;
     var intersections_upper = try calculateHorizontalLineIntersections(0, outlines);
@@ -268,13 +266,20 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                     //
                     // We only have a upper or lower scanline
                     //
+
+                    //
+                    // Idea: You might also be able to set the invert flag based on the direction of t
+                    //       Taking advantage of winding order
+                    //
                     print("Rasterizing with only one scanline\n");
                     std.debug.assert(lower_opt == null or upper_opt == null);
                     const is_upper = (lower_opt == null);
                     const pair = if (is_upper) upper_opt.? else lower_opt.?;
                     const outline_index = pair.start.outline_index;
+                    std.log.info("Outline index {d} segment count {d}", .{ outline_index, outlines[outline_index].segments.len });
                     std.debug.assert(outline_index == pair.end.outline_index);
                     const outline = outlines[outline_index];
+                    const sample_t_max = @intToFloat(f64, outlines[outline_index].segments.len);
 
                     std.log.info("Fill: (t {d}, x {d}) -> (t {d}, x {d})", .{
                         pair.start.t,
@@ -332,15 +337,6 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                             sample_t_increment = -backward / @intToFloat(f64, samples_to_take);
                         }
                     }
-
-                    {
-                        var end_sample_abs = @mod(sample_t_start + (sample_t_increment * @intToFloat(f64, samples_to_take)), sample_t_max);
-                        if (end_sample_abs < 0.0) {
-                            end_sample_abs += sample_t_max;
-                        }
-                        std.debug.assert(end_sample_abs == sample_t_end);
-                    }
-
                     std.log.info("Sample range: {d}->{d} {d} increment {d} count {d}", .{
                         sample_t_start,
                         sample_t_end,
@@ -348,6 +344,16 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                         sample_t_increment,
                         samples_to_take,
                     });
+                    std.debug.assert(sample_t_length <= (sample_t_max / 2.0));
+
+                    {
+                        var end_sample_abs = @mod(sample_t_start + (sample_t_increment * @intToFloat(f64, samples_to_take)), sample_t_max);
+                        if (end_sample_abs < 0.0) {
+                            end_sample_abs += sample_t_max;
+                        }
+                        std.debug.assert(floatCompare(end_sample_abs, sample_t_end));
+                    }
+
                     var previous_sampled_point = Point(f64){
                         .x = pair.start.x_intersect - @intToFloat(f64, pixel_start),
                         .y = if (is_upper) 1.0 else 0.0,
