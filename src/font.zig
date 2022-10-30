@@ -813,7 +813,7 @@ const IntersectionList = struct {
             for (slice) |other, other_i| {
                 if (other.t == base_t or other.t == candidate_t) continue;
                 if (other_i == candidate_index or other_i == base_index) continue;
-                if (other.outline_index != base_index) continue;
+                if (other.outline_index != base_outline_index) continue;
                 const dist_other = @mod(other.t + (max_t - base_t), max_t);
                 if (dist_other < dist_forward) {
                     // std.debug.print("Better match (forward) [{d}] t {d}: [{d}] t {d}\n", .{
@@ -828,7 +828,7 @@ const IntersectionList = struct {
         for (slice) |other, other_i| {
             if (other.t == base_t or other.t == candidate_t) continue;
             if (other_i == candidate_index or other_i == base_index) continue;
-            if (other.outline_index != base_index) continue;
+            if (other.outline_index != base_outline_index) continue;
             const dist_other = @mod(@fabs(base_t + (max_t - other.t)), max_t);
             if (dist_other < dist_reverse) {
                 // std.debug.print("Better match (reverse) [{d}] t {d}: [{d}] t {d}\n", .{
@@ -1235,6 +1235,9 @@ fn calculateHorizontalLineIntersections(scanline_y: f64, outlines: []Outline) !Y
                     printf("Curve (2nd) w/ t {d}\n", .{@intToFloat(f64, segment_i) + second_intersection.t});
                 } else {
                     printf("REJECT - Non intersecting\n", .{});
+                    const i = quadraticBezierPlaneIntersections(bezier, scanline_y);
+                    std.debug.assert(i[0] == null);
+                    std.debug.assert(i[1] == null);
                 }
                 continue;
             }
@@ -1488,18 +1491,35 @@ fn interpolateBoundryPoint(inside: Point(f64), outside: Point(f64)) Point(f64) {
 }
 
 fn quadraticBezierPlaneIntersections(bezier: BezierQuadratic, horizontal_axis: f64) [2]?CurveYIntersection {
-    const a = bezier.a.y;
-    const b = bezier.control.y;
-    const c = bezier.b.y;
+    const a: f64 = bezier.a.y;
+    const b: f64 = bezier.control.y;
+    const c: f64 = bezier.b.y;
 
+    //
+    // Handle edge-case where control.y is exactly inbetween end points (Leading to NaN)
+    // A control point in the middle can be ignored and a normal percent based calculation is used.
+    //
     const term_a = a - (2 * b) + c;
+    if (term_a == 0.0) {
+        const min = @minimum(a, c);
+        const max = @maximum(a, c);
+        if (horizontal_axis < min or horizontal_axis > max) return .{ null, null };
+        const dist = c - a;
+        const t = (horizontal_axis - a) / dist;
+        std.debug.assert(t >= 0.0 and t <= 1.0);
+        return .{
+            CurveYIntersection{ .t = t, .x = quadraticBezierPoint(bezier, t).x },
+            null,
+        };
+    }
+
     const term_b = 2 * (b - a);
     const term_c = a - horizontal_axis;
 
-    const sqrt_calculation = std.math.sqrt((term_b * term_b) - (4 * term_a * term_c));
+    const sqrt_calculation = std.math.sqrt((term_b * term_b) - (4.0 * term_a * term_c));
 
-    const first_intersection_t = ((-term_b) + sqrt_calculation) / (2 * term_a);
-    const second_intersection_t = ((-term_b) - sqrt_calculation) / (2 * term_a);
+    const first_intersection_t = ((-term_b) + sqrt_calculation) / (2.0 * term_a);
+    const second_intersection_t = ((-term_b) - sqrt_calculation) / (2.0 * term_a);
 
     const is_first_valid = (first_intersection_t <= 1.0 and first_intersection_t >= 0.0);
     const is_second_valid = (second_intersection_t <= 1.0 and second_intersection_t >= 0.0);
