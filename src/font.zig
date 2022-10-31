@@ -55,13 +55,16 @@ test "calculatePercentage" {
     try std.testing.expect(calcPercentage(1.0, 11.0, 3.5) == 0.25);
 }
 
-fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
-    printVertices(vertices, scale);
+/// Converts array of Vertex into array of Outline (Our own format)
+/// Applies Y flip and scaling
+fn createOutlines(allocator: Allocator, vertices: []Vertex, height: f64, scale: f32) ![]Outline {
+    // TODO:
+    std.debug.assert(@intToEnum(VMove, vertices[0].kind) == .move);
+
     var outline_segment_lengths = [1]u32{0} ** 32;
     const outline_count: u32 = blk: {
         var count: u32 = 0;
-        for (vertices) |vertex, vertex_i| {
-            if (vertex_i == 0) continue;
+        for (vertices[1..]) |vertex| {
             if (@intToEnum(VMove, vertex.kind) == .move) {
                 count += 1;
                 continue;
@@ -80,13 +83,9 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
     }
 
     {
-        // TODO:
-        std.debug.assert(@intToEnum(VMove, vertices[0].kind) == .move);
         var vertex_index: u32 = 1;
         var outline_index: u32 = 0;
         var outline_segment_index: u32 = 0;
-        const height = @intToFloat(f64, dimensions.height);
-        std.log.info("Dimensions: {d}, {d}", .{ dimensions.width, height });
         while (vertex_index < vertices.len) {
             switch (@intToEnum(VMove, vertices[vertex_index].kind)) {
                 .move => {
@@ -135,7 +134,13 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
             }
         }
     }
+    return outlines;
+}
 
+fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
+    printVertices(vertices, scale);
+    const outlines = try createOutlines(allocator, vertices, @intToFloat(f64, dimensions.height), scale);
+    defer allocator.free(outlines);
     printOutlines(outlines);
 
     const bitmap_pixel_count = @intCast(usize, dimensions.width) * dimensions.height;
@@ -273,11 +278,13 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                     //
                     print("Rasterizing with only one scanline\n");
                     std.debug.assert(lower_opt == null or upper_opt == null);
+
                     const is_upper = (lower_opt == null);
                     const pair = if (is_upper) upper_opt.? else lower_opt.?;
                     const outline_index = pair.start.outline_index;
                     std.log.info("Outline index {d} segment count {d}", .{ outline_index, outlines[outline_index].segments.len });
                     std.debug.assert(outline_index == pair.end.outline_index);
+
                     const outline = outlines[outline_index];
                     const sample_t_max = @intToFloat(f64, outlines[outline_index].segments.len);
 
@@ -287,6 +294,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                         pair.end.t,
                         pair.end.x_intersect,
                     });
+
                     const pixel_start = @floatToInt(usize, @floor(pair.start.x_intersect));
                     const pixel_end = @floatToInt(usize, @floor(pair.end.x_intersect));
                     std.debug.assert(pixel_start <= pixel_end);
@@ -363,6 +371,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                     var current_sampled_point: Point(f64) = undefined;
                     var sample_t: f64 = undefined;
                     var coverage: f64 = 0.0;
+
                     while (sample_index < samples_to_take) : (sample_index += 1) {
                         current_sampled_point = blk: {
                             sample_t = blk2: {
@@ -387,21 +396,10 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                         if (current_sampled_point.x >= 1.0) {
                             // We've sampled into the neigbouring right pixel.
                             // Interpolate a pixel on the rightside and then set the pixel value.
-                            std.log.info("Interpolating endpoint", .{});
+                            std.log.info("Point crosses righthand pixel border. Interpolating endpoint", .{});
                             std.debug.assert(current_sampled_point.x > previous_sampled_point.x);
-                            const interpolated_endpoint = blk: {
-                                const percentage = calcPercentage(previous_sampled_point.x, current_sampled_point.x, 1.0);
-                                const y_diff = current_sampled_point.y - previous_sampled_point.y;
-                                std.debug.assert(floatCompare(previous_sampled_point.y + y_diff, current_sampled_point.y));
-                                const interpolated_y = previous_sampled_point.y + (y_diff * percentage);
-                                std.debug.assert(interpolated_y >= 0.0);
-                                std.debug.assert(interpolated_y <= 1.0);
-                                break :blk Point(f64){
-                                    .x = 1.0,
-                                    .y = interpolated_y,
-                                };
-                            };
-                            coverage += triangleArea(interpolated_endpoint, previous_sampled_point, fill_anchor_point);
+                            const interpolated_point = interpolateBoundryPoint(previous_sampled_point, current_sampled_point);
+                            coverage += triangleArea(interpolated_point, previous_sampled_point, fill_anchor_point);
                             std.debug.assert(coverage >= 0.0);
                             std.debug.assert(coverage <= 1.0);
                             if (invert_coverage) {
@@ -413,7 +411,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                             //
                             // Adjust for next pixel
                             //
-                            previous_sampled_point = .{ .x = 0.0, .y = interpolated_endpoint.y };
+                            previous_sampled_point = .{ .x = 0.0, .y = interpolated_point.y };
                             current_sampled_point.x -= 1.0;
                             std.debug.assert(current_sampled_point.x >= 0.0);
                             std.debug.assert(current_sampled_point.x <= 1.0);
@@ -446,21 +444,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                             .x = pair.end.x_intersect - @intToFloat(f64, pixel_end),
                             .y = if (is_upper) 1.0 else 0.0,
                         };
-                        std.log.info("Calculating interpolated point {d}, {d} --> {d}, {d}", .{
-                            current_sampled_point.x,
-                            current_sampled_point.y,
-                            end_point.x,
-                            end_point.y,
-                        });
-                        const percentage = calcPercentage(current_sampled_point.x, 1.0 + end_point.x, 1.0);
-                        const y_diff = current_sampled_point.y - end_point.y;
-                        const interpolated_y = end_point.y + (y_diff * percentage);
-                        std.debug.assert(interpolated_y >= 0.0);
-                        std.debug.assert(interpolated_y <= 1.0);
-                        break :blk Point(f64){
-                            .x = 0.0,
-                            .y = interpolated_y,
-                        };
+                        break :blk interpolateBoundryPoint(current_sampled_point, end_point);
                     };
                     coverage += triangleArea(interpolated_point, previous_sampled_point, fill_anchor_point);
                     if (invert_coverage) {
@@ -474,6 +458,10 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
             std.log.info("Skipping rasterization", .{});
         }
         intersections_upper = intersections_lower;
+    }
+
+    for (outlines) |*outline| {
+        allocator.free(outline.segments);
     }
 
     return bitmap;
@@ -928,27 +916,8 @@ inline fn isTConnected(other_slice: []const f64, base_index: usize, candidate_in
     return true;
 }
 
-// test "sortByT" {
-//     const expect = std.testing.expect;
-//     var result_buffer: [10]usize = undefined;
-//     const unsorted = [_]usize{ 5, 4, 2, 6 };
-//     const slice: []const usize = unsorted[0..];
-//     const a = sortByT(usize, slice, result_buffer[0 .. slice.len + 2]);
-//     print("\n", .{});
-//     for (a) |x| {
-//         print("{d} ", .{x});
-//     }
-//     print("\n", .{});
-//     try expect(a[0] == 3);
-//     try expect(a[1] == 2);
-//     try expect(a[2] == 1);
-//     try expect(a[3] == 0);
-//     try expect(a[4] == 3);
-//     try expect(a[5] == 2);
-// }
-
-// Assumptions
-// 1.
+/// Takes a list of upper and lower intersections, and groups them into
+/// 2 or 4 point intersections that makes it easy for the rasterizer
 fn combineIntersectionLists(
     uppers: []const YIntersection,
     lowers: []const YIntersection,
@@ -959,28 +928,17 @@ fn combineIntersectionLists(
     // Lines are connected if:
     // 1. Connected by T
     // 2. Middle t lies within scanline
+    // 3. Part of the same outline
     //
-    // TODO:
-    // const outline = outlines[0];
-    // const outline_max_t = @intToFloat(f64, outline.segments.len);
-
     const intersections = IntersectionList.makeFromSeperateScanlines(uppers, lowers);
     print("Printing custom intersection buffer\n");
     intersections.print();
 
-    {
-        var i: usize = 0;
-        while (i < uppers.len) : (i += 1) {
-            std.debug.assert(intersections.isUpper(i));
-        }
-        while (i < (uppers.len + lowers.len)) : (i += 1) {
-            std.debug.assert(!intersections.isUpper(i));
-        }
-    }
-
     const total_count: usize = uppers.len + lowers.len;
     std.debug.assert(intersections.length() == total_count);
 
+    // TODO: Hard coded size
+    //       Replace [2]usize with struct
     var pair_list: [10][2]usize = undefined;
     var pair_count: usize = 0;
     {
@@ -1097,8 +1055,8 @@ fn combineIntersectionLists(
                 // Pair touches both scanlines
                 // You need to find the match
                 // Match criteria:
-                // 1. Also across both scanlines
-                // 2. Has the most leftmost point
+                //   1. Also across both scanlines
+                //   2. Has the most leftmost point
                 //
                 var x: usize = i + 1;
                 const ref_x_intersect: f64 = @maximum(start.x_intersect, end.x_intersect);
@@ -1414,31 +1372,6 @@ fn distanceBetweenPoints(point_a: Point(f64), point_b: Point(f64)) f64 {
     return sqrt(pow(point_b.y - point_a.y, 2) + pow(point_a.x - point_b.x, 2));
 }
 
-const TessalatedRegion = struct {
-    const AnchorPoint = struct {
-        point: Point(f64),
-        count: u32,
-    };
-
-    shape_points: []Point(f64), // Should be normalized to inside pixel
-    anchor_points: []AnchorPoint, // Should all be on bounds of pixel
-
-    pub fn calculateArea(self: @This()) f64 {
-        var coverage: f64 = 0.0;
-        var point_index: usize = 0;
-        for (self.anchor_points) |anchor_point| {
-            var i: usize = 0;
-            while (i < anchor_point.count - 1) : (i += 1) {
-                coverage += triangleArea(self.shape_points[point_index], self.shape_points[point_index + 1], anchor_point.point);
-                point_index += 1;
-            }
-        }
-        std.debug.assert(coverage >= 0.0);
-        std.debug.assert(coverage <= 1.0);
-        return coverage;
-    }
-};
-
 /// Given two points, one that lies inside a normalized boundry and one that lies outside
 /// Interpolate a point between them that lies on the boundry of the imaginary 1x1 square
 fn interpolateBoundryPoint(inside: Point(f64), outside: Point(f64)) Point(f64) {
@@ -1488,6 +1421,106 @@ fn interpolateBoundryPoint(inside: Point(f64), outside: Point(f64)) Point(f64) {
         .x = inside.x + (x_difference * t),
         .y = inside.y + (y_difference * t),
     };
+}
+
+test "interpolateBoundryPoint" {
+    {
+        const in = Point(f64){
+            .x = 0.5,
+            .y = 0.5,
+        };
+        const out = Point(f64){
+            .x = -2.0,
+            .y = 0.5,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 0.5);
+        try std.testing.expect(result.x == 0.0);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 0.5,
+            .y = 0.5,
+        };
+        const out = Point(f64){
+            .x = 2.0,
+            .y = 0.5,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 0.5);
+        try std.testing.expect(result.x == 1.0);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 0.5,
+            .y = 0.5,
+        };
+        const out = Point(f64){
+            .x = 0.5,
+            .y = 2.0,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 1.0);
+        try std.testing.expect(result.x == 0.5);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 0.25,
+            .y = 0.25,
+        };
+        const out = Point(f64){
+            .x = 1.5,
+            .y = 2.0,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 1.0);
+        try std.testing.expect(result.x == 0.7857142857142857);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 0.75,
+            .y = 0.25,
+        };
+        const out = Point(f64){
+            .x = -1.5,
+            .y = 2.0,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 0.8333333333333333);
+        try std.testing.expect(result.x == 0.0);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 0.0,
+            .y = 0.0,
+        };
+        const out = Point(f64){
+            .x = -1.5,
+            .y = -2.0,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 0.0);
+        try std.testing.expect(result.x == 0.0);
+    }
+
+    {
+        const in = Point(f64){
+            .x = 1.0,
+            .y = 1.0,
+        };
+        const out = Point(f64){
+            .x = 2.5,
+            .y = 1.0,
+        };
+        const result = interpolateBoundryPoint(in, out);
+        try std.testing.expect(result.y == 1.0);
+        try std.testing.expect(result.x == 1.0);
+    }
 }
 
 fn quadraticBezierPlaneIntersections(bezier: BezierQuadratic, horizontal_axis: f64) [2]?CurveYIntersection {
@@ -2398,106 +2431,6 @@ fn clampTo(value: f64, edge: f64, threshold: f64) f64 {
         return edge;
     }
     return value;
-}
-
-test "interpolateBoundryPoint" {
-    {
-        const in = Point(f64){
-            .x = 0.5,
-            .y = 0.5,
-        };
-        const out = Point(f64){
-            .x = -2.0,
-            .y = 0.5,
-        };
-        const result = interpolateBoundryPoint(in, out);
-        try std.testing.expect(result.y == 0.5);
-        try std.testing.expect(result.x == 0.0);
-    }
-
-    {
-        const in = Point(f64){
-            .x = 0.5,
-            .y = 0.5,
-        };
-        const out = Point(f64){
-            .x = 2.0,
-            .y = 0.5,
-        };
-        const result = interpolateBoundryPoint(in, out);
-        try std.testing.expect(result.y == 0.5);
-        try std.testing.expect(result.x == 1.0);
-    }
-
-    {
-        const in = Point(f64){
-            .x = 0.5,
-            .y = 0.5,
-        };
-        const out = Point(f64){
-            .x = 0.5,
-            .y = 2.0,
-        };
-        const result = interpolateBoundryPoint(in, out);
-        try std.testing.expect(result.y == 1.0);
-        try std.testing.expect(result.x == 0.5);
-    }
-
-    {
-        const in = Point(f64){
-            .x = 0.25,
-            .y = 0.25,
-        };
-        const out = Point(f64){
-            .x = 1.5,
-            .y = 2.0,
-        };
-        const result = interpolateBoundryPoint(in, out);
-        try std.testing.expect(result.y == 1.0);
-        try std.testing.expect(result.x == 0.7857142857142857);
-    }
-
-    {
-        const in = Point(f64){
-            .x = 0.75,
-            .y = 0.25,
-        };
-        const out = Point(f64){
-            .x = -1.5,
-            .y = 2.0,
-        };
-        const result = interpolateBoundryPoint(in, out);
-        try std.testing.expect(result.y == 0.8333333333333333);
-        try std.testing.expect(result.x == 0.0);
-    }
-
-    {
-        const in = Point(f64){
-            .x = 0.0,
-            .y = 0.0,
-        };
-        const out = Point(f64){
-            .x = -1.5,
-            .y = -2.0,
-        };
-        const result = interpolateBoundryPoint(in, out);
-        try std.testing.expect(result.y == 0.0);
-        try std.testing.expect(result.x == 0.0);
-    }
-
-    {
-        const in = Point(f64){
-            .x = 1.0,
-            .y = 1.0,
-        };
-        const out = Point(f64){
-            .x = 2.5,
-            .y = 1.0,
-        };
-        const result = interpolateBoundryPoint(in, out);
-        try std.testing.expect(result.y == 1.0);
-        try std.testing.expect(result.x == 1.0);
-    }
 }
 
 fn printOutlines(outlines: []Outline) void {
