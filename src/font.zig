@@ -96,15 +96,13 @@ fn createOutlines(allocator: Allocator, vertices: []Vertex, height: f64, scale: 
                 .line => {
                     const from = vertices[vertex_index - 1];
                     const to = vertices[vertex_index];
+                    const point_from = Point(f64){ .x = @intToFloat(f64, from.x) * scale, .y = height - (@intToFloat(f64, from.y) * scale) };
+                    const point_to = Point(f64){ .x = @intToFloat(f64, to.x) * scale, .y = height - (@intToFloat(f64, to.y) * scale) };
+                    const dist = distanceBetweenPoints(point_from, point_to);
                     outlines[outline_index].segments[outline_segment_index] = OutlineSegment{
-                        .from = Point(f64){
-                            .x = @intToFloat(f64, from.x) * scale,
-                            .y = height - (@intToFloat(f64, from.y) * scale),
-                        },
-                        .to = Point(f64){
-                            .x = @intToFloat(f64, to.x) * scale,
-                            .y = height - (@intToFloat(f64, to.y) * scale),
-                        },
+                        .from = point_from,
+                        .to = point_to,
+                        .t_per_pixel = 1.0 / dist,
                     };
                     vertex_index += 1;
                     outline_segment_index += 1;
@@ -112,20 +110,32 @@ fn createOutlines(allocator: Allocator, vertices: []Vertex, height: f64, scale: 
                 .curve => {
                     const from = vertices[vertex_index - 1];
                     const to = vertices[vertex_index];
-                    outlines[outline_index].segments[outline_segment_index] = OutlineSegment{
-                        .from = Point(f64){
-                            .x = @intToFloat(f64, from.x) * scale,
-                            .y = height - (@intToFloat(f64, from.y) * scale),
-                        },
-                        .to = Point(f64){
-                            .x = @intToFloat(f64, to.x) * scale,
-                            .y = height - (@intToFloat(f64, to.y) * scale),
-                        },
+                    const point_from = Point(f64){ .x = @intToFloat(f64, from.x) * scale, .y = height - (@intToFloat(f64, from.y) * scale) };
+                    const point_to = Point(f64){ .x = @intToFloat(f64, to.x) * scale, .y = height - (@intToFloat(f64, to.y) * scale) };
+                    var segment_ptr: *OutlineSegment = &outlines[outline_index].segments[outline_segment_index];
+                    segment_ptr.* = OutlineSegment{
+                        .from = point_from,
+                        .to = point_to,
+                        .t_per_pixel = undefined,
                         .control_opt = Point(f64){
                             .x = @intToFloat(f64, to.control1_x) * scale,
                             .y = height - (@intToFloat(f64, to.control1_y) * scale),
                         },
                     };
+                    const outline_length_pixels: f64 = blk: {
+                        //
+                        // Approximate length of bezier curve
+                        //
+                        var i: usize = 1;
+                        var accumulator: f64 = 0;
+                        var point_previous = point_from;
+                        while (i <= 10) : (i += 1) {
+                            const point_sampled = segment_ptr.sample(@intToFloat(f64, i) * 0.1);
+                            accumulator += distanceBetweenPoints(point_previous, point_sampled);
+                        }
+                        break :blk accumulator;
+                    };
+                    segment_ptr.t_per_pixel = (1.0 / outline_length_pixels);
                     vertex_index += 1;
                     outline_segment_index += 1;
                 },
@@ -138,7 +148,7 @@ fn createOutlines(allocator: Allocator, vertices: []Vertex, height: f64, scale: 
 }
 
 fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Vertex, scale: f32) !Bitmap {
-    printVertices(vertices, scale);
+    // printVertices(vertices, scale);
     const outlines = try createOutlines(allocator, vertices, @intToFloat(f64, dimensions.height), scale);
     defer allocator.free(outlines);
     printOutlines(outlines);
@@ -163,7 +173,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
             const uppers = intersections_upper.buffer[0..intersections_upper.len];
             const lowers = intersections_lower.buffer[0..intersections_lower.len];
             const connected_intersections = try combineIntersectionLists(uppers, lowers, @intToFloat(f64, scanline_upper), outlines);
-            const samples_per_pixel = 3;
+            const samples_per_pixel = 10;
             for (connected_intersections.buffer[0..connected_intersections.len]) |intersect_pair| {
                 const invert_coverage = intersect_pair.flags.invert_coverage;
                 const upper_opt = intersect_pair.upper;
@@ -181,9 +191,8 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                         //
                         // Start Anti-aliasing
                         //
-                        const start_x = @minimum(upper.start.x_intersect, lower.start.x_intersect);
-                        const end_x = @maximum(upper.start.x_intersect, lower.start.x_intersect);
-                        const ends_upper = if (end_x == upper.start.x_intersect) true else false;
+                        const start_x = @min(upper.start.x_intersect, lower.start.x_intersect);
+                        const end_x = @max(upper.start.x_intersect, lower.start.x_intersect);
                         const pixel_start = @floatToInt(usize, @floor(start_x));
                         const pixel_end = @floatToInt(usize, @floor(end_x));
                         const is_vertical = (@floor(start_x) == @floor(end_x));
@@ -198,29 +207,38 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                             std.debug.assert(c >= 0);
                             bitmap.pixels[pixel_start + base_index] = graphics.RGBA(f32).fromInt(u8, c, c, c, 255);
                         } else {
-                            const start_top = if (start_x == upper.start.x_intersect) true else false;
-                            var i = pixel_start;
-                            var entry_point = Point(f64){ .x = start_x - @floor(start_x), .y = 0.0 };
-
-                            const pixel_range = pixel_end - pixel_start;
-                            if (pixel_range > 1) {
-                                std.log.info("Pixel range: {d}", .{pixel_range});
-                            }
-
-                            while (i <= pixel_end) : (i += 1) {
-                                const last_point = Point(f64){ .x = end_x - entry_point.x, .y = if (ends_upper) 1.0 else 0.0 };
+                            const starts_upper = if (upper.start.x_intersect < lower.start.x_intersect) true else false;
+                            const start_fill_anchor_point = Point(f64){ .x = 1.0, .y = if (starts_upper) 1.0 else 0.0 };
+                            var entry_point = Point(f64){ .x = start_x - @floor(start_x), .y = start_fill_anchor_point.y };
+                            var last_point = Point(f64){ .x = end_x - @intToFloat(f64, pixel_start), .y = 1.0 - start_fill_anchor_point.y };
+                            {
                                 const exit_point = interpolateBoundryPoint(entry_point, last_point);
-                                std.debug.assert(exit_point.x >= 0.0);
-                                std.debug.assert(exit_point.x <= 1.0);
-                                std.debug.assert(exit_point.y >= 0.0);
-                                std.debug.assert(exit_point.y <= 1.0);
-                                const fill_anchor_point = Point(f64){ .x = 1.0, .y = if (start_top) 0.0 else 1.0 };
-                                const c = @floatToInt(u8, @floor(255.0 * triangleArea(entry_point, exit_point, fill_anchor_point)));
+                                const c = @floatToInt(u8, @floor(255.0 * triangleArea(entry_point, exit_point, start_fill_anchor_point)));
+                                bitmap.pixels[pixel_start + base_index] = graphics.RGBA(f32).fromInt(u8, c, c, c, 255);
+                                entry_point = Point(f64){ .x = 0.0, .y = exit_point.y };
+                            }
+                            std.debug.assert(entry_point.x >= 0.0);
+                            std.debug.assert(entry_point.x <= 1.0);
+                            var i = pixel_start + 1;
+                            while (i < pixel_end) : (i += 1) {
+                                last_point.x = end_x - @intToFloat(f64, i);
+                                const exit_point = interpolateBoundryPoint(entry_point, last_point);
+                                const c = (@floatToInt(u8, (255.0 * (entry_point.y + exit_point.y)) / 2.0));
                                 std.debug.assert(c <= 255);
                                 std.debug.assert(c >= 0);
                                 bitmap.pixels[i + base_index] = graphics.RGBA(f32).fromInt(u8, c, c, c, 255);
                                 entry_point = Point(f64){ .x = 0.0, .y = exit_point.y };
                             }
+                            const end_fill_anchor_point = Point(f64){
+                                .x = 1.0,
+                                .y = 1.0 - start_fill_anchor_point.x,
+                            };
+                            last_point.x = end_x - @floor(end_x);
+                            std.debug.assert(i == pixel_end);
+                            const c = 255 - @floatToInt(u8, @floor(255.0 * triangleArea(entry_point, last_point, end_fill_anchor_point)));
+                            std.debug.assert(c <= 255);
+                            std.debug.assert(c >= 0);
+                            bitmap.pixels[i + base_index] = graphics.RGBA(f32).fromInt(u8, c, c, c, 255);
                         }
                         fill_start = @floatToInt(i32, @floor(end_x)) + 1;
                     }
@@ -228,9 +246,8 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                         //
                         // End Anti-aliasing
                         //
-                        const start_x = @minimum(upper.end.x_intersect, lower.end.x_intersect);
-                        const end_x = @maximum(upper.end.x_intersect, lower.end.x_intersect);
-                        const ends_upper = if (end_x == upper.end.x_intersect) true else false;
+                        const start_x = @min(upper.end.x_intersect, lower.end.x_intersect);
+                        const end_x = @max(upper.end.x_intersect, lower.end.x_intersect);
                         const pixel_start = @floatToInt(usize, @floor(start_x));
                         const pixel_end = @floatToInt(usize, @floor(end_x));
                         const is_vertical = (@floor(start_x) == @floor(end_x));
@@ -240,23 +257,36 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                             std.debug.assert(c >= 0);
                             bitmap.pixels[pixel_start + base_index] = graphics.RGBA(f32).fromInt(u8, c, c, c, 255);
                         } else {
-                            const start_top = if (start_x == upper.end.x_intersect) true else false;
-                            var i = pixel_start;
-                            var entry_point = Point(f64){ .x = start_x - @floor(start_x), .y = 0.0 };
-                            while (i <= pixel_end) : (i += 1) {
-                                const last_point = Point(f64){ .x = end_x - entry_point.x, .y = if (ends_upper) 1.0 else 0.0 };
+                            const starts_upper = if (upper.end.x_intersect < lower.end.x_intersect) true else false;
+                            const start_fill_anchor_point = Point(f64){ .x = 1.0, .y = if (starts_upper) 1.0 else 0.0 };
+                            var entry_point = Point(f64){ .x = start_x - @floor(start_x), .y = start_fill_anchor_point.y };
+                            var last_point = Point(f64){ .x = end_x - @intToFloat(f64, pixel_start), .y = 1.0 - start_fill_anchor_point.y };
+                            {
                                 const exit_point = interpolateBoundryPoint(entry_point, last_point);
-                                std.debug.assert(exit_point.x >= 0.0);
-                                std.debug.assert(exit_point.x <= 1.0);
-                                std.debug.assert(exit_point.y >= 0.0);
-                                std.debug.assert(exit_point.y <= 1.0);
-                                const fill_anchor_point = Point(f64){ .x = 1.0, .y = if (start_top) 0.0 else 1.0 };
-                                const c = @floatToInt(u8, @floor(255.0 * triangleArea(entry_point, exit_point, fill_anchor_point)));
+                                const c = 255 - @floatToInt(u8, @floor(255.0 * triangleArea(entry_point, exit_point, start_fill_anchor_point)));
+                                bitmap.pixels[pixel_start + base_index] = graphics.RGBA(f32).fromInt(u8, c, c, c, 255);
+                                entry_point = Point(f64){ .x = 0.0, .y = exit_point.y };
+                            }
+                            var i = pixel_start + 1;
+                            while (i < pixel_end) : (i += 1) {
+                                last_point.x = end_x - @intToFloat(f64, i);
+                                const exit_point = interpolateBoundryPoint(entry_point, last_point);
+                                const c = 255 - (@floatToInt(u8, (255.0 * (entry_point.y + exit_point.y)) / 2.0));
                                 std.debug.assert(c <= 255);
                                 std.debug.assert(c >= 0);
                                 bitmap.pixels[i + base_index] = graphics.RGBA(f32).fromInt(u8, c, c, c, 255);
                                 entry_point = Point(f64){ .x = 0.0, .y = exit_point.y };
                             }
+                            const end_fill_anchor_point = Point(f64){
+                                .x = 1.0,
+                                .y = 1.0 - start_fill_anchor_point.x,
+                            };
+                            last_point.x = end_x - @floor(end_x);
+                            std.debug.assert(i == pixel_end);
+                            const c = @floatToInt(u8, @floor(255.0 * triangleArea(entry_point, last_point, end_fill_anchor_point)));
+                            std.debug.assert(c <= 255);
+                            std.debug.assert(c >= 0);
+                            bitmap.pixels[i + base_index] = graphics.RGBA(f32).fromInt(u8, c, c, c, 255);
                         }
                         fill_end = @floatToInt(i32, @floor(start_x)) - 1;
                     }
@@ -276,24 +306,24 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                     // Idea: You might also be able to set the invert flag based on the direction of t
                     //       Taking advantage of winding order
                     //
-                    print("Rasterizing with only one scanline\n");
+                    // print("Rasterizing with only one scanline\n");
                     std.debug.assert(lower_opt == null or upper_opt == null);
 
                     const is_upper = (lower_opt == null);
                     const pair = if (is_upper) upper_opt.? else lower_opt.?;
                     const outline_index = pair.start.outline_index;
-                    std.log.info("Outline index {d} segment count {d}", .{ outline_index, outlines[outline_index].segments.len });
+                    // std.log.info("Outline index {d} segment count {d}", .{ outline_index, outlines[outline_index].segments.len });
                     std.debug.assert(outline_index == pair.end.outline_index);
 
                     const outline = outlines[outline_index];
                     const sample_t_max = @intToFloat(f64, outlines[outline_index].segments.len);
 
-                    std.log.info("Fill: (t {d}, x {d}) -> (t {d}, x {d})", .{
-                        pair.start.t,
-                        pair.start.x_intersect,
-                        pair.end.t,
-                        pair.end.x_intersect,
-                    });
+                    // std.log.info("Fill: (t {d}, x {d}) -> (t {d}, x {d})", .{
+                    //     pair.start.t,
+                    //     pair.start.x_intersect,
+                    //     pair.end.t,
+                    //     pair.end.x_intersect,
+                    // });
 
                     const pixel_start = @floatToInt(usize, @floor(pair.start.x_intersect));
                     const pixel_end = @floatToInt(usize, @floor(pair.end.x_intersect));
@@ -307,11 +337,6 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                         bitmap.pixels[pixel_x + base_index] = graphics.RGBA(f32).fromInt(u8, c, c, c, 255);
                         continue;
                     }
-
-                    var fill_anchor_point = Point(f64){
-                        .x = 1.0,
-                        .y = if (is_upper) 1.0 else 0.0,
-                    };
 
                     const samples_to_take: usize = pixel_count * samples_per_pixel;
                     const sample_t_start = pair.start.t;
@@ -345,6 +370,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                             sample_t_increment = -backward / @intToFloat(f64, samples_to_take);
                         }
                     }
+
                     std.log.info("Sample range: {d}->{d} {d} increment {d} count {d}", .{
                         sample_t_start,
                         sample_t_end,
@@ -355,6 +381,12 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                     std.debug.assert(sample_t_length <= (sample_t_max / 2.0));
 
                     {
+                        const predicted_end = @mod(sample_t_max + sample_t_start + (@intToFloat(f64, samples_to_take) * sample_t_increment), sample_t_max);
+                        std.log.info("Predicted end at sample #{d}: {d}", .{ samples_to_take, predicted_end });
+                        std.debug.assert(floatCompare(predicted_end, sample_t_end));
+                    }
+
+                    {
                         var end_sample_abs = @mod(sample_t_start + (sample_t_increment * @intToFloat(f64, samples_to_take)), sample_t_max);
                         if (end_sample_abs < 0.0) {
                             end_sample_abs += sample_t_max;
@@ -362,6 +394,10 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                         std.debug.assert(floatCompare(end_sample_abs, sample_t_end));
                     }
 
+                    var fill_anchor_point = Point(f64){
+                        .x = 1.0,
+                        .y = if (is_upper) 1.0 else 0.0,
+                    };
                     var previous_sampled_point = Point(f64){
                         .x = pair.start.x_intersect - @intToFloat(f64, pixel_start),
                         .y = if (is_upper) 1.0 else 0.0,
@@ -374,21 +410,30 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
 
                     while (sample_index < samples_to_take) : (sample_index += 1) {
                         current_sampled_point = blk: {
-                            sample_t = blk2: {
-                                const val = @mod(sample_t_start + (sample_t_increment * @intToFloat(f64, sample_index)), sample_t_max);
-                                break :blk2 if (val >= 0.0) val else val + sample_t_max;
-                            };
+                            sample_t = sample_t_start + (sample_t_increment * @intToFloat(f64, sample_index));
+                            // sample_t in this form can become negative or greater than sample_t_max
+                            // Add sample_t_max and mod to wrap around within range
+                            sample_t = @mod(sample_t + sample_t_max, sample_t_max);
+                            std.debug.assert(sample_t >= 0.0);
+                            std.debug.assert(sample_t <= sample_t_max);
                             const absolute_sampled_point = outline.samplePoint(sample_t);
                             break :blk Point(f64){
                                 .x = absolute_sampled_point.x - @intToFloat(f64, pixel_x),
                                 .y = absolute_sampled_point.y - base_y,
                             };
                         };
-                        std.log.info("Sample #{d}: t {d} current ({d}, {d})", .{
+                        //
+                        // It is possible that outline will cross into right pixel briefy before going back
+                        //
+                        if (current_sampled_point.x < 0.0) {
+                            current_sampled_point.x = 0.0;
+                        }
+                        std.log.info("Sample #{d}: t {d} current ({d}, {d}) abs_x {d}", .{
                             sample_index,
                             sample_t,
                             current_sampled_point.x,
                             current_sampled_point.y,
+                            current_sampled_point.x + @intToFloat(f64, pixel_x),
                         });
                         std.debug.assert(current_sampled_point.y >= 0.0);
                         std.debug.assert(current_sampled_point.y <= 1.0);
@@ -396,7 +441,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                         if (current_sampled_point.x >= 1.0) {
                             // We've sampled into the neigbouring right pixel.
                             // Interpolate a pixel on the rightside and then set the pixel value.
-                            std.log.info("Point crosses righthand pixel border. Interpolating endpoint", .{});
+                            // std.log.info("Point crosses righthand pixel border. Interpolating endpoint", .{});
                             std.debug.assert(current_sampled_point.x > previous_sampled_point.x);
                             const interpolated_point = interpolateBoundryPoint(previous_sampled_point, current_sampled_point);
                             coverage += triangleArea(interpolated_point, previous_sampled_point, fill_anchor_point);
@@ -415,7 +460,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                             current_sampled_point.x -= 1.0;
                             std.debug.assert(current_sampled_point.x >= 0.0);
                             std.debug.assert(current_sampled_point.x <= 1.0);
-                            std.log.info("Calculating coverage for pixel {d}", .{pixel_x});
+                            // std.log.info("Calculating coverage for pixel {d}", .{pixel_x});
                             fill_anchor_point.x = 0.0;
                             pixel_x += 1;
                             //
@@ -429,14 +474,16 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                             std.debug.assert(coverage <= 1.0);
                             previous_sampled_point = current_sampled_point;
                         }
-                    } // end while
+                    }
                     //
                     // Rasterize last pixel
                     //
-                    std.log.info("Rasterizing last pixel", .{});
+                    // std.log.info("Rasterizing last pixel", .{});
                     const interpolated_point = blk: {
+                        std.debug.print("Current x: {d}\n", .{current_sampled_point.x});
+                        std.debug.assert(current_sampled_point.x >= 0.0);
                         if (@floatToInt(usize, @floor(current_sampled_point.x)) == pixel_end) {
-                            std.log.info("Can use sampled point", .{});
+                            // std.log.info("Can use sampled point", .{});
                             break :blk current_sampled_point;
                         }
                         // We actually need to interpolate a point between current_sampled_point and last point
@@ -452,7 +499,7 @@ fn rasterize(allocator: Allocator, dimensions: Dimensions2D(u32), vertices: []Ve
                     }
                     const c = @floatToInt(u8, coverage * 255.0);
                     bitmap.pixels[pixel_x + base_index] = graphics.RGBA(f32).fromInt(u8, c, c, c, 255);
-                } // end if
+                }
             }
         } else {
             std.log.info("Skipping rasterization", .{});
@@ -498,6 +545,71 @@ const Outline = struct {
         }
         // This function cannot fail (Barring a bug in the code), as an outline is a closed loop
         unreachable;
+    }
+};
+
+const OutlineSegment = struct {
+    from: Point(f64),
+    to: Point(f64),
+    control_opt: ?Point(f64) = null,
+    /// The t value that corresponds to 1 pixel of distance (approx)
+    t_per_pixel: f64,
+
+    pub inline fn isCurve(self: @This()) bool {
+        return self.control_opt != null;
+    }
+
+    pub inline fn isLine(self: @This()) bool {
+        return self.control_opt == null;
+    }
+
+    pub fn sample(self: @This(), t: f64) Point(f64) {
+        std.debug.assert(t <= 1.0);
+        std.debug.assert(t >= 0.0);
+        if (self.control_opt) |control| {
+            const bezier = BezierQuadratic{
+                .a = self.from,
+                .b = self.to,
+                .control = control,
+            };
+            return quadraticBezierPoint(bezier, t);
+        }
+        return .{
+            .x = self.from.x + (self.to.x - self.from.x) * t,
+            .y = self.from.y + (self.to.y - self.from.y) * t,
+        };
+    }
+
+    pub fn sampleAtDistance(self: @This(), ideal: f64, threshold: f64, base_point: SampledPoint) ?SampledPoint {
+        if (self.control_opt) |_| {
+            const distance_max: f64 = (ideal - threshold);
+            const distance_min: f64 = (ideal - threshold);
+            var t_increment: f64 = base_point.t_increment;
+            var i: usize = 0;
+            while (i < 20) : (i += 1) {
+                const sampled_point = self.sample(base_point + t_increment);
+                const distance = distanceBetweenPoints(sampled_point, base_point.p);
+                if ((distance > distance_max) or (distance < distance_min)) {
+                    t_increment = std.math.clamp(t_increment / (distance / ideal), 0.0, 1.0);
+                    continue;
+                }
+                return SampledPoint{
+                    .p = sampled_point,
+                    .t = base_point + t_increment,
+                    .t_increment = t_increment,
+                };
+            }
+            return null;
+        }
+        const line_length = distanceBetweenPoints(self.to, self.from);
+        const t_increment: f64 = ideal / line_length;
+        const new_t: f64 = base_point.t + t_increment;
+        if (new_t > 1.0) return null;
+        return SampledPoint{
+            .p = self.sample(new_t),
+            .t = new_t,
+            .t_increment = t_increment,
+        };
     }
 };
 
@@ -665,7 +777,7 @@ inline fn minTDistance(a: f64, b: f64, max: f64) f64 {
     const positive = (a <= b);
     const dist_forward = if (positive) b - a else b + (max - a);
     const dist_reverse = if (positive) max - dist_forward else a - b;
-    const dist_min = @minimum(dist_forward, dist_reverse);
+    const dist_min = @min(dist_forward, dist_reverse);
     return dist_min;
 }
 
@@ -772,7 +884,7 @@ const IntersectionList = struct {
     inline fn isUpper(self: @This(), index: usize) bool {
         const upper_start: u32 = self.upper_index_start;
         const upper_end: i64 = upper_start + @intCast(i64, self.upper_count) - 1;
-        std.log.info("isUpper: start {d}, end {d}, index {d}", .{ upper_start, upper_end, index });
+        // std.log.info("isUpper: start {d}, end {d}, index {d}", .{ upper_start, upper_end, index });
         return (upper_start <= upper_end and index >= upper_start and index <= upper_end);
     }
 
@@ -931,8 +1043,8 @@ fn combineIntersectionLists(
     // 3. Part of the same outline
     //
     const intersections = IntersectionList.makeFromSeperateScanlines(uppers, lowers);
-    print("Printing custom intersection buffer\n");
-    intersections.print();
+    // print("Printing custom intersection buffer\n");
+    // intersections.print();
 
     const total_count: usize = uppers.len + lowers.len;
     std.debug.assert(intersections.length() == total_count);
@@ -950,7 +1062,7 @@ fn combineIntersectionLists(
             const intersection_outline = outlines[intersection_outline_index];
             const outline_max_t = @intToFloat(f64, intersection_outline.segments.len);
             var other_i: usize = intersection_i + 1;
-            std.debug.print("Checking matches of {d}\n", .{intersection_i});
+            // std.debug.print("Checking matches of {d}\n", .{intersection_i});
             var smallest_t_diff = std.math.floatMax(f64);
             var best_match_index: ?usize = null;
             while (other_i < total_count) : (other_i += 1) {
@@ -959,14 +1071,14 @@ fn combineIntersectionLists(
                 if (intersection.t == other_intersection.t) continue;
                 const other_intersection_outline_index = other_intersection.outline_index;
                 if (other_intersection_outline_index != intersection_outline_index) continue;
-                std.debug.print("  Comparing with {d}\n", .{other_i});
+                // std.debug.print("  Comparing with {d}\n", .{other_i});
                 const within_scanline = blk: {
                     const middle_t = minTMiddle(intersection.t, other_intersection.t, outline_max_t);
                     // TODO: Specialized implementation of samplePoint just for y value
                     const sample_point = intersection_outline.samplePoint(middle_t);
-                    std.debug.print("  Sample point @t {d}: {d}, {d}\n", .{ middle_t, sample_point.x, sample_point.y });
+                    // std.debug.print("  Sample point @t {d}: {d}, {d}\n", .{ middle_t, sample_point.x, sample_point.y });
                     const relative_y = sample_point.y - base_scanline;
-                    std.debug.print("  relative_y: {d}\n", .{relative_y});
+                    // std.debug.print("  relative_y: {d}\n", .{relative_y});
                     break :blk relative_y >= 0.0 and relative_y <= 1.0;
                 };
                 if (!within_scanline) {
@@ -980,13 +1092,13 @@ fn combineIntersectionLists(
                         smallest_t_diff = t_diff;
                         best_match_index = other_i;
                     }
-                    std.log.info("Potential match with index {d}", .{other_i});
+                    // std.log.info("Potential match with index {d}", .{other_i});
                 } else {
-                    std.log.info("Rejected because not t connected", .{});
+                    // std.log.info("Rejected because not t connected", .{});
                 }
             }
             if (best_match_index) |match_index| {
-                std.log.info("Matched with index {d}", .{match_index});
+                // std.log.info("Matched with index {d}", .{match_index});
                 const match_intersection = intersections.at(match_index);
                 const swap = intersection.x_intersect > match_intersection.x_intersect;
                 pair_list[pair_count][0] = if (swap) match_index else intersection_i;
@@ -1000,26 +1112,26 @@ fn combineIntersectionLists(
         }
     }
 
-    {
-        var i: usize = 0;
-        print("Connected pairs:\n");
-        while (i < pair_count) : (i += 1) {
-            const p = pair_list[i];
-            const a = intersections.at(p[0]);
-            const b = intersections.at(p[1]);
-            std.debug.print("[{d}]: t {d} x {d} -> t {d} x {d}\n", .{
-                i,
-                a.t,
-                a.x_intersect,
-                b.t,
-                b.x_intersect,
-            });
-        }
-        print("\n");
-    }
+    // {
+    //     var i: usize = 0;
+    //     print("Connected pairs:\n");
+    //     while (i < pair_count) : (i += 1) {
+    //         const p = pair_list[i];
+    //         const a = intersections.at(p[0]);
+    //         const b = intersections.at(p[1]);
+    //         std.debug.print("[{d}]: t {d} x {d} -> t {d} x {d}\n", .{
+    //             i,
+    //             a.t,
+    //             a.x_intersect,
+    //             b.t,
+    //             b.x_intersect,
+    //         });
+    //     }
+    //     print("\n");
+    // }
 
     const min_pair_count = @divTrunc(total_count, 2);
-    std.debug.print("Min pair count: {d} actual count {d}\n", .{ min_pair_count, pair_count });
+    // std.debug.print("Min pair count: {d} actual count {d}\n", .{ min_pair_count, pair_count });
 
     std.debug.assert(pair_count >= min_pair_count);
 
@@ -1031,15 +1143,15 @@ fn combineIntersectionLists(
             if (matched[i]) continue;
             const index_start = pair_list[i][0];
             const index_end = pair_list[i][1];
-            std.debug.print("Matching pair {d} & {d}\n", .{ index_start, index_end });
+            // std.debug.print("Matching pair {d} & {d}\n", .{ index_start, index_end });
             const start = intersections.at(index_start);
             const end = intersections.at(index_end);
-            std.debug.print("Start x {d} end x {d}\n", .{ start.x_intersect, end.x_intersect });
+            // std.debug.print("Start x {d} end x {d}\n", .{ start.x_intersect, end.x_intersect });
             std.debug.assert(start.x_intersect <= end.x_intersect);
             const start_is_upper = intersections.isUpper(index_start);
             const end_is_upper = intersections.isUpper(index_end);
             if (start_is_upper == end_is_upper) {
-                print("On same scanline. Adding as-is\n");
+                // print("On same scanline. Adding as-is\n");
                 const intersection_pair = YIntersectionPair{
                     .start = start,
                     .end = end,
@@ -1050,7 +1162,7 @@ fn combineIntersectionLists(
                     try connection_list.add(.{ .upper = null, .lower = intersection_pair });
                 }
             } else {
-                print("Different scanline, searching for closing match\n");
+                // print("Different scanline, searching for closing match\n");
                 //
                 // Pair touches both scanlines
                 // You need to find the match
@@ -1059,7 +1171,7 @@ fn combineIntersectionLists(
                 //   2. Has the most leftmost point
                 //
                 var x: usize = i + 1;
-                const ref_x_intersect: f64 = @maximum(start.x_intersect, end.x_intersect);
+                const ref_x_intersect: f64 = @max(start.x_intersect, end.x_intersect);
                 var smallest_x: f64 = std.math.floatMax(f64);
                 var smallest_index_opt: ?usize = null;
                 while (x < pair_count) : (x += 1) {
@@ -1068,14 +1180,14 @@ fn combineIntersectionLists(
                     const comp_start_is_upper = intersections.isUpper(comp_index_start);
                     const comp_end_is_upper = intersections.isUpper(comp_index_end);
                     if (comp_start_is_upper == comp_end_is_upper) {
-                        std.log.info("Comp on same scanline", .{});
+                        // std.log.info("Comp on same scanline", .{});
                         continue;
                     }
 
                     const comp_start = intersections.at(comp_index_start);
                     const comp_end = intersections.at(comp_index_end);
-                    const comp_x = @minimum(comp_start.x_intersect, comp_end.x_intersect);
-                    std.debug.print("Comp_x: {d} against {d}\n", .{ comp_x, ref_x_intersect });
+                    const comp_x = @min(comp_start.x_intersect, comp_end.x_intersect);
+                    // std.debug.print("Comp_x: {d} against {d}\n", .{ comp_x, ref_x_intersect });
                     if (comp_x >= ref_x_intersect and comp_x < smallest_x) {
                         smallest_x = comp_x;
                         smallest_index_opt = x;
@@ -1114,41 +1226,42 @@ fn combineIntersectionLists(
         }
     }
 
-    std.debug.print("Final connection list\n", .{});
-    connection_list.print();
+    // std.debug.print("Final connection list\n", .{});
+    // connection_list.print();
 
     return connection_list;
 }
 
 fn calculateHorizontalLineIntersections(scanline_y: f64, outlines: []Outline) !YIntersectionList {
     var intersection_list = YIntersectionList{ .len = 0, .buffer = undefined };
-    const printf = std.debug.print;
-    std.log.info("Calculating intersections for scanline {d}", .{scanline_y});
+    // const printf = std.debug.print;
+    // _ = printf;
+    // std.log.info("Calculating intersections for scanline {d}", .{scanline_y});
     for (outlines) |outline, outline_i| {
         for (outline.segments) |segment, segment_i| {
             const point_a = segment.from;
             const point_b = segment.to;
-            const max_y = @maximum(point_a.y, point_b.y);
-            const min_y = @minimum(point_a.y, point_b.y);
+            const max_y = @max(point_a.y, point_b.y);
+            const min_y = @min(point_a.y, point_b.y);
             if (segment.isCurve()) {
                 // TODO: Improve bounding box calculation
                 // https://iquilezles.org/articles/bezierbbox/
                 const control_point = segment.control_opt.?;
-                printf("  {d:.2} Vertex (curve) A({d:.2}, {d:.2}) --> B({d:.2}, {d:.2}) C ({d:.2}, {d:.2}) -- ", .{
-                    segment_i,
-                    point_a.x,
-                    point_a.y,
-                    point_b.x,
-                    point_b.y,
-                    control_point.x,
-                    control_point.y,
-                });
+                // printf("  {d:.2} Vertex (curve) A({d:.2}, {d:.2}) --> B({d:.2}, {d:.2}) C ({d:.2}, {d:.2}) -- ", .{
+                //     segment_i,
+                //     point_a.x,
+                //     point_a.y,
+                //     point_b.x,
+                //     point_b.y,
+                //     control_point.x,
+                //     control_point.y,
+                // });
                 const bezier = BezierQuadratic{ .a = point_a, .b = point_b, .control = control_point };
                 const inflection_y = quadradicBezierInflectionPoint(bezier).y;
                 const is_middle_higher = (inflection_y > max_y) and scanline_y > inflection_y;
                 const is_middle_lower = (inflection_y < min_y) and scanline_y < inflection_y;
                 if (is_middle_higher or is_middle_lower) {
-                    printf("REJECT - Outsize Y range\n", .{});
+                    // printf("REJECT - Outsize Y range\n", .{});
                     {
                         // TODO: Remove paranoia check
                         const intersections = quadraticBezierPlaneIntersections(bezier, scanline_y);
@@ -1177,12 +1290,12 @@ fn calculateHorizontalLineIntersections(scanline_y: f64, outlines: []Outline) !Y
                                 .t = t_second,
                             };
                             try intersection_list.add(intersection);
-                            printf("Curve (1st) w/ t {d} && (2nd) w/ t {d}\n", .{ @intToFloat(f64, segment_i) + first_intersection.t, t_second });
+                            // printf("Curve (1st) w/ t {d} && (2nd) w/ t {d}\n", .{ @intToFloat(f64, segment_i) + first_intersection.t, t_second });
                         } else {
-                            std.log.warn("Collapsing two points in curve into one w/ t {d}", .{@intToFloat(f64, segment_i) + first_intersection.t});
+                            // std.log.warn("Collapsing two points in curve into one w/ t {d}", .{@intToFloat(f64, segment_i) + first_intersection.t});
                         }
                     } else {
-                        printf("Curve (1st) w/ t {d}\n", .{@intToFloat(f64, segment_i) + first_intersection.t});
+                        // printf("Curve (1st) w/ t {d}\n", .{@intToFloat(f64, segment_i) + first_intersection.t});
                     }
                 } else if (optional_intersection_points[1]) |second_intersection| {
                     try intersection_list.add(.{
@@ -1190,9 +1303,9 @@ fn calculateHorizontalLineIntersections(scanline_y: f64, outlines: []Outline) !Y
                         .x_intersect = second_intersection.x,
                         .t = @intToFloat(f64, segment_i) + second_intersection.t,
                     });
-                    printf("Curve (2nd) w/ t {d}\n", .{@intToFloat(f64, segment_i) + second_intersection.t});
+                    // printf("Curve (2nd) w/ t {d}\n", .{@intToFloat(f64, segment_i) + second_intersection.t});
                 } else {
-                    printf("REJECT - Non intersecting\n", .{});
+                    // printf("REJECT - Non intersecting\n", .{});
                     const i = quadraticBezierPlaneIntersections(bezier, scanline_y);
                     std.debug.assert(i[0] == null);
                     std.debug.assert(i[1] == null);
@@ -1203,14 +1316,14 @@ fn calculateHorizontalLineIntersections(scanline_y: f64, outlines: []Outline) !Y
             //
             // Outline segment is a line
             //
-            printf("  {d:.2} Vertex (line) {d:^5.2} x {d:^5.2} --> {d:^5.2} x {d:^5.2} -- ", .{ segment_i, point_a.x, point_a.y, point_b.x, point_b.y });
+            // printf("  {d:.2} Vertex (line) {d:^5.2} x {d:^5.2} --> {d:^5.2} x {d:^5.2} -- ", .{ segment_i, point_a.x, point_a.y, point_b.x, point_b.y });
             std.debug.assert(max_y >= min_y);
             if (scanline_y > max_y or scanline_y < min_y) {
-                printf("REJECT - Outsize Y range\n", .{});
+                // printf("REJECT - Outsize Y range\n", .{});
                 continue;
             }
             if (point_a.y == point_b.y) {
-                printf("REJECT - horizontal\n", .{});
+                // printf("REJECT - horizontal\n", .{});
                 continue;
             }
 
@@ -1242,7 +1355,7 @@ fn calculateHorizontalLineIntersections(scanline_y: f64, outlines: []Outline) !Y
                     .x_intersect = point_a.x,
                     .t = t,
                 });
-                printf("Vertical line w/ t {d}\n", .{t});
+                // printf("Vertical line w/ t {d}\n", .{t});
             } else {
                 const x_diff = point_b.x - point_a.x;
                 const x_intersect = point_a.x + (x_diff * interp_t);
@@ -1251,12 +1364,12 @@ fn calculateHorizontalLineIntersections(scanline_y: f64, outlines: []Outline) !Y
                     .x_intersect = x_intersect,
                     .t = t,
                 });
-                printf("Line w/ t {d}\n", .{t});
+                // printf("Line w/ t {d}\n", .{t});
             }
         }
     }
 
-    std.log.info("{d} intersections found", .{intersection_list.len});
+    // std.log.info("{d} intersections found", .{intersection_list.len});
 
     // TODO:
     std.debug.assert(intersection_list.len % 2 == 0);
@@ -1301,75 +1414,11 @@ fn calculateHorizontalLineIntersections(scanline_y: f64, outlines: []Outline) !Y
     return intersection_list;
 }
 
-const OutlineSegment = struct {
-    from: Point(f64),
-    to: Point(f64),
-    control_opt: ?Point(f64) = null,
-    // bounding_box: BoundingBox(f64),
-
-    pub inline fn isCurve(self: @This()) bool {
-        return self.control_opt != null;
-    }
-
-    pub inline fn isLine(self: @This()) bool {
-        return self.control_opt == null;
-    }
-
-    pub fn sample(self: @This(), t: f64) Point(f64) {
-        std.debug.assert(t <= 1.0);
-        std.debug.assert(t >= 0.0);
-        if (self.control_opt) |control| {
-            const bezier = BezierQuadratic{
-                .a = self.from,
-                .b = self.to,
-                .control = control,
-            };
-            return quadraticBezierPoint(bezier, t);
-        }
-        return .{
-            .x = self.from.x + (self.to.x - self.from.x) * t,
-            .y = self.from.y + (self.to.y - self.from.y) * t,
-        };
-    }
-
-    pub fn sampleAtDistance(self: @This(), ideal: f64, threshold: f64, base_point: SampledPoint) ?SampledPoint {
-        if (self.control_opt) |_| {
-            const distance_max: f64 = (ideal - threshold);
-            const distance_min: f64 = (ideal - threshold);
-            var t_increment: f64 = base_point.t_increment;
-            var i: usize = 0;
-            while (i < 20) : (i += 1) {
-                const sampled_point = self.sample(base_point + t_increment);
-                const distance = distanceBetweenPoints(sampled_point, base_point.p);
-                if ((distance > distance_max) or (distance < distance_min)) {
-                    t_increment = std.math.clamp(t_increment / (distance / ideal), 0.0, 1.0);
-                    continue;
-                }
-                return SampledPoint{
-                    .p = sampled_point,
-                    .t = base_point + t_increment,
-                    .t_increment = t_increment,
-                };
-            }
-            return null;
-        }
-        const line_length = distanceBetweenPoints(self.to, self.from);
-        const t_increment: f64 = ideal / line_length;
-        const new_t: f64 = base_point.t + t_increment;
-        if (new_t > 1.0) return null;
-        return SampledPoint{
-            .p = self.sample(new_t),
-            .t = new_t,
-            .t_increment = t_increment,
-        };
-    }
-};
-
 // TODO: Double check formula and write some tests
 fn distanceBetweenPoints(point_a: Point(f64), point_b: Point(f64)) f64 {
     const pow = std.math.pow;
     const sqrt = std.math.sqrt;
-    return sqrt(pow(point_b.y - point_a.y, 2) + pow(point_a.x - point_b.x, 2));
+    return sqrt(pow(f64, point_b.y - point_a.y, 2) + pow(f64, point_a.x - point_b.x, 2));
 }
 
 /// Given two points, one that lies inside a normalized boundry and one that lies outside
@@ -1534,8 +1583,8 @@ fn quadraticBezierPlaneIntersections(bezier: BezierQuadratic, horizontal_axis: f
     //
     const term_a = a - (2 * b) + c;
     if (term_a == 0.0) {
-        const min = @minimum(a, c);
-        const max = @maximum(a, c);
+        const min = @min(a, c);
+        const max = @max(a, c);
         if (horizontal_axis < min or horizontal_axis > max) return .{ null, null };
         const dist = c - a;
         const t = (horizontal_axis - a) / dist;
@@ -2326,26 +2375,21 @@ fn getGlyphBitmapSubpixel(allocator: Allocator, info: FontInfo, desired_scale: S
 
     std.debug.assert(scale.x == scale.y);
 
+    const unscaled_bb = try getGlyphBoundingBox(info, glyph_index);
+
     std.log.info("Scale: {d}", .{scale.x});
 
     const bounding_box = try getGlyphBoundingBoxScaled(info, glyph_index, scale);
 
-    const unscaled_bb = try getGlyphBoundingBox(info, glyph_index);
     std.log.info("Generated BB {d} {d} {d} {d}", .{ unscaled_bb.x0, unscaled_bb.y0, unscaled_bb.x1, unscaled_bb.y1 });
 
-    // printVertices(vertices);
-
-    // Scale, shift and invert y for vertices
     std.debug.assert(unscaled_bb.y1 >= unscaled_bb.y0);
-    // const unscaled_y_range: i16 = @intCast(i16, unscaled_bb.y1 - unscaled_bb.y0);
     for (vertices) |*vertex| {
         vertex.x -= @intCast(i16, unscaled_bb.x0);
         vertex.y -= @intCast(i16, unscaled_bb.y0);
-        // vertex.y = unscaled_y_range - vertex.y;
         if (@intToEnum(VMove, vertex.kind) == .curve) {
             vertex.control1_x -= @intCast(i16, unscaled_bb.x0);
             vertex.control1_y -= @intCast(i16, unscaled_bb.y0);
-            // vertex.control1_y = unscaled_y_range - vertex.control1_y;
         }
     }
     const dimensions = Dimensions2D(u32){
@@ -2375,10 +2419,6 @@ fn printPoints(points: []Point(f64)) void {
         print("  {d:2} xy ({d}, {d})\n", .{ i, point.x, point.y });
     }
     print("Done\n", .{});
-}
-
-fn calculateLineSegmentSlope(point_a: Point(f64), point_b: Point(f64)) f64 {
-    return (point_a.y - point_b.y) / (point_a.x - point_b.x);
 }
 
 fn pixelFill(coverage: f64) graphics.RGBA(f32) {
@@ -2968,299 +3008,4 @@ fn findGlyphIndex(font_info: FontInfo, unicode_codepoint: i32) u32 {
 
         return @intCast(u32, toNative(u16, result_addr_aligned.*, .Big));
     }
-}
-
-//
-// Construction
-//
-
-fn getGlyphShape2(allocator: Allocator, info: FontInfo, glyph_index: i32) ![]Outline {
-    if (info.cff.size != 0) {
-        return error.CffFound;
-    }
-
-    // TODO:
-    const data = info.data;
-
-    var vertices: []Vertex = undefined;
-    var vertices_count: u32 = 0;
-
-    // Find the byte offset of the glyh table
-    const glyph_offset = try getGlyfOffset(info, glyph_index);
-    const glyph_offset_index: usize = @ptrToInt(data.ptr) + glyph_offset;
-
-    if (glyph_offset < 0) {
-        return error.InvalidGlypOffset;
-    }
-
-    // Beginning of the glyf table
-    // See: https://docs.microsoft.com/en-us/typography/opentype/spec/glyf
-    const contour_count_signed = readBigEndian(i16, glyph_offset_index);
-
-    const min_x = readBigEndian(i16, glyph_offset_index + 2);
-    const min_y = readBigEndian(i16, glyph_offset_index + 4);
-    const max_x = readBigEndian(i16, glyph_offset_index + 6);
-    const max_y = readBigEndian(i16, glyph_offset_index + 8);
-
-    std.log.info("Glyph vertex range: min {d} x {d} max {d} x {d}", .{ min_x, min_y, max_x, max_y });
-    std.log.info("Stripped dimensions {d} x {d}", .{ max_x - min_x, max_y - min_y });
-
-    if (contour_count_signed > 0) {
-        const contour_count: u32 = @intCast(u16, contour_count_signed);
-
-        var j: i32 = 0;
-        var m: u32 = 0;
-        var n: u16 = 0;
-
-        // Index of the next point that begins a new contour
-        // This will correspond to value after end_points_of_contours
-        var next_move: i32 = 0;
-
-        var off: usize = 0;
-
-        // end_points_of_contours is located directly after GlyphHeader in the glyf table
-        const end_points_of_contours = @intToPtr([*]u16, glyph_offset_index + @sizeOf(GlyhHeader));
-        const end_points_of_contours_size = @intCast(usize, contour_count * @sizeOf(u16));
-
-        const simple_glyph_table_index = glyph_offset_index + @sizeOf(GlyhHeader);
-
-        // Get the size of the instructions so we can skip past them
-        const instructions_size_bytes = readBigEndian(i16, simple_glyph_table_index + end_points_of_contours_size);
-
-        var glyph_flags: [*]u8 = @intToPtr([*]u8, glyph_offset_index + @sizeOf(GlyhHeader) + (@intCast(usize, contour_count) * 2) + 2 + @intCast(usize, instructions_size_bytes));
-
-        // NOTE: The number of flags is determined by the last entry in the endPtsOfContours array
-        n = 1 + readBigEndian(u16, @ptrToInt(end_points_of_contours) + (@intCast(usize, contour_count - 1) * 2));
-
-        const x_coords = glyph_flags[n .. n * 2];
-        const y_coords = glyph_flags[n * 2 .. n * 3];
-
-        // What is m here?
-        // Size of contours
-        {
-            // Allocate space for all the flags, and vertices
-            m = n + (2 * contour_count);
-            vertices = try allocator.alloc(Vertex, @intCast(usize, m));
-
-            assert((m - n) > 0);
-            off = (2 * contour_count);
-        }
-
-        {
-            //
-            // Construction
-            //
-            var i: usize = 0;
-            var flag_repeat_count: i32 = 0;
-            var x_index: u32 = 0;
-            var y_index: u32 = 0;
-            var flag_index: u32 = 0;
-            // On curve points
-            var x: i16 = 0;
-            var y: i16 = 0;
-            // Off curve (bezier control) points
-            // var control_x: i16 = 0;
-            // var control_y: i16 = 0;
-
-            // var next_outline_end_index = end_points_of_contours[0];
-
-            while (i < n) : (i += 1) {
-                const flags = glyph_flags[flag_index];
-                if (flag_repeat_count <= 0) {
-                    if (isFlagSet(flags, GlyphFlags.repeat_flag)) {
-                        flag_repeat_count = glyph_flags[i + 1];
-                        i += 1;
-                    }
-                    flag_index += 1;
-                }
-                flag_repeat_count -= 1;
-
-                //
-                // Load x coordinates
-                //
-                if (isFlagSet(flags, GlyphFlags.x_short_vector)) {
-                    const dx: i16 = x_coords[x_index];
-                    x += if (isFlagSet(flags, GlyphFlags.positive_x_short_vector)) dx else -dx;
-                    x_index += 1;
-                } else {
-                    if (!isFlagSet(flags, GlyphFlags.same_x)) {
-                        // The current x-coordinate is a signed 16-bit delta vector
-                        x += (@intCast(i16, x_coords[x_index]) << 8) + x_coords[x_index + 1];
-                        x_index += 2;
-                    } else {
-                        // If `!x_short_vector` and `same_x` then the same `x` value shall be appended
-                        // https://learn.microsoft.com/en-us/typography/opentype/spec/glyf
-                        // See: X_IS_SAME_OR_POSITIVE_X_SHORT_VECTOR
-                    }
-                }
-
-                //
-                // Load y coordinates
-                //
-                if (isFlagSet(flags, GlyphFlags.y_short_vector)) {
-                    const dy: i16 = y_coords[y_index];
-                    y_index += 1;
-                    y += if (isFlagSet(flags, GlyphFlags.positive_y_short_vector)) dy else -dy;
-                } else {
-                    if (!isFlagSet(flags, GlyphFlags.same_y)) {
-                        // The current y-coordinate is a signed 16-bit delta vector
-                        y += (@intCast(i16, y_coords[y_index]) << 8) + y_coords[y_index + 1];
-                        y_index += 2;
-                    } else {
-                        // If `!y_short_vector` and `same_y` then the same `y` value shall be appended
-                        // https://learn.microsoft.com/en-us/typography/opentype/spec/glyf
-                        // See: Y_IS_SAME_OR_POSITIVE_Y_SHORT_VECTOR
-                    }
-                }
-            }
-        }
-
-        var flags: u8 = GlyphFlags.none;
-        {
-            var i: usize = 0;
-            var flag_count: u8 = 0;
-            while (i < n) : (i += 1) {
-                if (flag_count == 0) {
-                    flags = glyph_flags[0];
-                    glyph_flags = glyph_flags + 1;
-                    if (isFlagSet(flags, GlyphFlags.repeat_flag)) {
-                        // If `repeat_flag` is set, the next flag is the number of times to repeat
-                        flag_count = glyph_flags[0];
-                        glyph_flags = glyph_flags + 1;
-                    }
-                } else {
-                    flag_count -= 1;
-                }
-                vertices[@intCast(usize, off) + @intCast(usize, i)].kind = flags;
-            }
-        }
-
-        {
-            var x: i16 = 0;
-            var i: usize = 0;
-            while (i < n) : (i += 1) {
-                flags = vertices[@intCast(usize, off) + @intCast(usize, i)].kind;
-                if (isFlagSet(flags, GlyphFlags.x_short_vector)) {
-                    const dx: i16 = glyph_flags[0];
-                    glyph_flags += 1;
-                    x += if (isFlagSet(flags, GlyphFlags.positive_x_short_vector)) dx else -dx;
-                } else {
-                    if (!isFlagSet(flags, GlyphFlags.same_x)) {
-
-                        // The current x-coordinate is a signed 16-bit delta vector
-                        const abs_x = (@intCast(i16, glyph_flags[0]) << 8) + glyph_flags[1];
-
-                        x += abs_x;
-                        glyph_flags += 2;
-                    }
-                }
-                // If: `!x_short_vector` and `same_x` then the same `x` value shall be appended
-                vertices[off + i].x = x;
-            }
-        }
-
-        {
-            var y: i16 = 0;
-            var i: usize = 0;
-            while (i < n) : (i += 1) {
-                flags = vertices[off + i].kind;
-                if (isFlagSet(flags, GlyphFlags.y_short_vector)) {
-                    const dy: i16 = glyph_flags[0];
-                    glyph_flags += 1;
-                    y += if (isFlagSet(flags, GlyphFlags.positive_y_short_vector)) dy else -dy;
-                } else {
-                    if (!isFlagSet(flags, GlyphFlags.same_y)) {
-                        // The current y-coordinate is a signed 16-bit delta vector
-                        const abs_y = (@intCast(i16, glyph_flags[0]) << 8) + glyph_flags[1];
-                        y += abs_y;
-                        glyph_flags += 2;
-                    }
-                }
-                // If: `!y_short_vector` and `same_y` then the same `y` value shall be appended
-                vertices[off + i].y = y;
-            }
-        }
-        assert(vertices_count == 0);
-
-        var i: usize = 0;
-        var x: i16 = 0;
-        var y: i16 = 0;
-
-        var control1_x: i32 = 0;
-        var control1_y: i32 = 0;
-        var start_x: i32 = 0;
-        var start_y: i32 = 0;
-
-        var scx: i32 = 0; // start_control_point_x
-        var scy: i32 = 0; // start_control_point_y
-
-        var was_off: bool = false;
-        var first_point_off_curve: bool = false;
-
-        next_move = 0;
-        while (i < n) : (i += 1) {
-            const current_vertex = vertices[off + i];
-            if (next_move == i) { // End of contour
-                if (i != 0) {
-                    vertices_count = closeShape(vertices, vertices_count, was_off, first_point_off_curve, start_x, start_y, scx, scy, control1_x, control1_y);
-                }
-
-                first_point_off_curve = ((current_vertex.kind & GlyphFlags.on_curve_point) == 0);
-                if (first_point_off_curve) {
-                    scx = current_vertex.x;
-                    scy = current_vertex.y;
-                    if (!isFlagSet(vertices[off + i + 1].kind, GlyphFlags.on_curve_point)) {
-                        start_x = x + (vertices[off + i + 1].x >> 1);
-                        start_y = y + (vertices[off + i + 1].y >> 1);
-                    } else {
-                        start_x = current_vertex.x + (vertices[off + i + 1].x);
-                        start_y = current_vertex.y + (vertices[off + i + 1].y);
-                        i += 1;
-                    }
-                } else {
-                    start_x = current_vertex.x;
-                    start_y = current_vertex.y;
-                }
-                setVertex(&vertices[vertices_count], .move, start_x, start_y, 0, 0);
-                vertices_count += 1;
-                was_off = false;
-                next_move = 1 + readBigEndian(i16, @ptrToInt(end_points_of_contours) + (@intCast(usize, j) * 2));
-                j += 1;
-            } else {
-                // Continue current contour
-                if (0 == (current_vertex.kind & GlyphFlags.on_curve_point)) {
-                    if (was_off) {
-                        // Even though we've encountered 2 control points in a row, this is still a simple
-                        // quadradic bezier (I.e 1 control point, 2 real points)
-                        // We can calculate the real point that lies between them by taking the average
-                        // of the two control points (It's omitted because it's redundant information)
-                        // https://stackoverflow.com/questions/20733790/
-                        const average_x = @divFloor(control1_x + current_vertex.x, 2);
-                        const average_y = @divFloor(control1_y + current_vertex.y, 2);
-                        setVertex(&vertices[vertices_count], .curve, average_x, average_y, control1_x, control1_y);
-                        vertices_count += 1;
-                    }
-                    control1_x = current_vertex.x;
-                    control1_y = current_vertex.y;
-                    was_off = true;
-                } else {
-                    if (was_off) {
-                        setVertex(&vertices[vertices_count], .curve, current_vertex.x, current_vertex.y, control1_x, control1_y);
-                    } else {
-                        setVertex(&vertices[vertices_count], .line, current_vertex.x, current_vertex.y, 0, 0);
-                    }
-                    vertices_count += 1;
-                    was_off = false;
-                }
-            }
-        }
-        vertices_count = closeShape(vertices, vertices_count, was_off, first_point_off_curve, start_x, start_y, scx, scy, control1_x, control1_y);
-    } else if (contour_count_signed < 0) {
-        // Glyph is composite
-        return error.InvalidContourCount;
-    } else {
-        unreachable;
-    }
-
-    return allocator.shrink(vertices, vertices_count);
 }
